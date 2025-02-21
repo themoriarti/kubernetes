@@ -49,10 +49,10 @@ import (
 	kubeletpodresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 	kubeletpodresourcesv1alpha1 "k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
-	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2etestfiles "k8s.io/kubernetes/test/e2e/framework/testfiles"
 	"k8s.io/kubernetes/test/e2e/nodefeature"
 )
@@ -63,7 +63,7 @@ var (
 )
 
 // Serial because the test restarts Kubelet
-var _ = SIGDescribe("Device Plugin", nodefeature.DevicePlugin, framework.WithSerial(), func() {
+var _ = SIGDescribe("Device Plugin", nodefeature.DevicePlugin, framework.WithSerial(), feature.DevicePlugin, func() {
 	f := framework.NewDefaultFramework("device-plugin-errors")
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	testDevicePlugin(f, kubeletdevicepluginv1beta1.DevicePluginPath)
@@ -283,8 +283,7 @@ func testDevicePlugin(f *framework.Framework, pluginSockDir string) {
 			gomega.Expect(v1ResourcesForOurPod.Containers[0].Devices[0].DeviceIds).To(gomega.HaveLen(1))
 		})
 
-		ginkgo.It("[NodeSpecialFeature:CDI] can make a CDI device accessible in a container", func(ctx context.Context) {
-			e2eskipper.SkipUnlessFeatureGateEnabled(features.DevicePluginCDIDevices)
+		f.It("can make a CDI device accessible in a container", feature.DevicePluginCDIDevices, func(ctx context.Context) {
 			// check if CDI_DEVICE env variable is set
 			// and only one correspondent device node /tmp/<CDI_DEVICE> is available inside a container
 			podObj := makeBusyboxPod(SampleDeviceResourceName, "[ $(ls /tmp/CDI-Dev-[1,2] | wc -l) -eq 1 -a -b /tmp/$CDI_DEVICE ]")
@@ -695,7 +694,7 @@ func testDevicePlugin(f *framework.Framework, pluginSockDir string) {
 			}
 		})
 
-		f.It("Can schedule a pod with a restartable init container", nodefeature.SidecarContainers, func(ctx context.Context) {
+		f.It("Can schedule a pod with a restartable init container", nodefeature.SidecarContainers, feature.SidecarContainers, func(ctx context.Context) {
 			podRECMD := "devs=$(ls /tmp/ | egrep '^Dev-[0-9]+$') && echo stub devices: $devs && sleep %s"
 			sleepOneSecond := "1s"
 			rl := v1.ResourceList{v1.ResourceName(SampleDeviceResourceName): *resource.NewQuantity(1, resource.DecimalSI)}

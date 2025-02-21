@@ -364,7 +364,7 @@ const (
 	CoreDNSImageName = "coredns"
 
 	// CoreDNSVersion is the version of CoreDNS to be deployed if it is used
-	CoreDNSVersion = "v1.11.3"
+	CoreDNSVersion = "v1.12.0"
 
 	// ClusterConfigurationKind is the string kind value for the ClusterConfiguration struct
 	ClusterConfigurationKind = "ClusterConfiguration"
@@ -495,10 +495,10 @@ var (
 
 	// SupportedEtcdVersion lists officially supported etcd versions with corresponding Kubernetes releases
 	SupportedEtcdVersion = map[uint8]string{
-		29: "3.5.16-0",
 		30: "3.5.16-0",
 		31: "3.5.16-0",
 		32: "3.5.16-0",
+		33: "3.5.16-0",
 	}
 
 	// KubeadmCertsClusterRoleName sets the name for the ClusterRole that allows

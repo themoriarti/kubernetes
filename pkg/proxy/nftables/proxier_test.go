@@ -21,6 +21,7 @@ package nftables
 
 import (
 	"fmt"
+	"golang.org/x/time/rate"
 	"net"
 	"reflect"
 	"testing"
@@ -117,9 +118,9 @@ func NewFakeProxier(ipFamily v1.IPFamily) (*knftables.Fake, *Proxier) {
 	p := &Proxier{
 		ipFamily:            ipFamily,
 		svcPortMap:          make(proxy.ServicePortMap),
-		serviceChanges:      proxy.NewServiceChangeTracker(newServiceInfo, ipFamily, nil, nil),
+		serviceChanges:      proxy.NewServiceChangeTracker(ipFamily, newServiceInfo, nil),
 		endpointsMap:        make(proxy.EndpointsMap),
-		endpointsChanges:    proxy.NewEndpointsChangeTracker(testHostname, newEndpointInfo, ipFamily, nil, nil),
+		endpointsChanges:    proxy.NewEndpointsChangeTracker(ipFamily, testHostname, newEndpointInfo, nil),
 		needFullSync:        true,
 		nftables:            nft,
 		masqueradeMark:      "0x4000",
@@ -132,6 +133,7 @@ func NewFakeProxier(ipFamily v1.IPFamily) (*knftables.Fake, *Proxier) {
 		networkInterfacer:   networkInterfacer,
 		staleChains:         make(map[string]time.Time),
 		serviceCIDRs:        serviceCIDRs,
+		logRateLimiter:      rate.NewLimiter(rate.Every(24*time.Hour), 1),
 		clusterIPs:          newNFTElementStorage("set", clusterIPsSet),
 		serviceIPs:          newNFTElementStorage("map", serviceIPsMap),
 		firewallIPs:         newNFTElementStorage("map", firewallIPsMap),

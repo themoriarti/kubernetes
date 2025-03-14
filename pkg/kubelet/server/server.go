@@ -59,6 +59,7 @@ import (
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/httplog"
 	"k8s.io/apiserver/pkg/server/routes"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/apiserver/pkg/util/flushwriter"
 	"k8s.io/component-base/configz"
@@ -68,6 +69,7 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/prometheus/slis"
 	zpagesfeatures "k8s.io/component-base/zpages/features"
+	"k8s.io/component-base/zpages/flagz"
 	"k8s.io/component-base/zpages/statusz"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/cri-client/pkg/util"
@@ -116,6 +118,7 @@ const (
 
 // Server is a http.Handler which exposes kubelet functionality over HTTP.
 type Server struct {
+	flagz                flagz.Reader
 	auth                 AuthInterface
 	host                 HostInterface
 	restfulCont          containerInterface
@@ -166,6 +169,7 @@ func ListenAndServeKubeletServer(
 	host HostInterface,
 	resourceAnalyzer stats.ResourceAnalyzer,
 	checkers []healthz.HealthChecker,
+	flagz flagz.Reader,
 	kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	tlsOptions *TLSOptions,
 	auth AuthInterface,
@@ -174,7 +178,7 @@ func ListenAndServeKubeletServer(
 	address := netutils.ParseIPSloppy(kubeCfg.Address)
 	port := uint(kubeCfg.Port)
 	klog.InfoS("Starting to listen", "address", address, "port", port)
-	handler := NewServer(host, resourceAnalyzer, checkers, auth, kubeCfg)
+	handler := NewServer(host, resourceAnalyzer, checkers, flagz, auth, kubeCfg)
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.KubeletTracing) {
 		handler.InstallTracingFilter(tp)
@@ -209,11 +213,12 @@ func ListenAndServeKubeletReadOnlyServer(
 	host HostInterface,
 	resourceAnalyzer stats.ResourceAnalyzer,
 	checkers []healthz.HealthChecker,
+	flagz flagz.Reader,
 	address net.IP,
 	port uint,
 	tp oteltrace.TracerProvider) {
 	klog.InfoS("Starting to listen read-only", "address", address, "port", port)
-	s := NewServer(host, resourceAnalyzer, checkers, nil, nil)
+	s := NewServer(host, resourceAnalyzer, checkers, nil, nil, nil)
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.KubeletTracing) {
 		s.InstallTracingFilter(tp, otelrestful.WithPublicEndpoint())
@@ -290,10 +295,12 @@ func NewServer(
 	host HostInterface,
 	resourceAnalyzer stats.ResourceAnalyzer,
 	checkers []healthz.HealthChecker,
+	flagz flagz.Reader,
 	auth AuthInterface,
 	kubeCfg *kubeletconfiginternal.KubeletConfiguration) Server {
 
 	server := Server{
+		flagz:                flagz,
 		host:                 host,
 		resourceAnalyzer:     resourceAnalyzer,
 		auth:                 auth,
@@ -305,9 +312,10 @@ func NewServer(
 	if auth != nil {
 		server.InstallAuthFilter()
 	}
-	server.InstallDefaultHandlers()
+	server.InstallAuthNotRequiredHandlers()
 	if kubeCfg != nil && kubeCfg.EnableDebuggingHandlers {
-		server.InstallDebuggingHandlers()
+		klog.InfoS("Adding debug handlers to kubelet server")
+		server.InstallAuthRequiredHandlers()
 		// To maintain backward compatibility serve logs and pprof only when enableDebuggingHandlers is also enabled
 		// see https://github.com/kubernetes/kubernetes/pull/87273
 		server.InstallSystemLogHandler(kubeCfg.EnableSystemLogHandler, kubeCfg.EnableSystemLogQuery)
@@ -401,9 +409,11 @@ func (s *Server) getMetricMethodBucket(method string) string {
 	return "other"
 }
 
-// InstallDefaultHandlers registers the default set of supported HTTP request
-// patterns with the restful Container.
-func (s *Server) InstallDefaultHandlers() {
+// InstallAuthNotRequiredHandlers registers request handlers that do not require authorization, which are
+// installed on both the unsecured and secured (TLS) servers.
+// NOTE: This method is maintained for backwards compatibility, but no new endpoints should be added
+// to this set. New handlers should be added under InstallAuthorizedHandlers.
+func (s *Server) InstallAuthNotRequiredHandlers() {
 	s.addMetricsBucketMatcher("healthz")
 	checkers := []healthz.HealthChecker{
 		healthz.PingHealthz,
@@ -480,22 +490,14 @@ func (s *Server) InstallDefaultHandlers() {
 		compbasemetrics.HandlerFor(p, compbasemetrics.HandlerOpts{ErrorHandling: compbasemetrics.ContinueOnError}),
 	)
 
-	// Only enable checkpoint API if the feature is enabled
-	if utilfeature.DefaultFeatureGate.Enabled(features.ContainerCheckpoint) {
-		s.addMetricsBucketMatcher("checkpoint")
-		ws = &restful.WebService{}
-		ws.Path(checkpointPath).Produces(restful.MIME_JSON)
-		ws.Route(ws.POST("/{podNamespace}/{podID}/{containerName}").
-			To(s.checkpoint).
-			Operation("checkpoint"))
-		s.restfulCont.Add(ws)
-	}
+	// DO NOT ADD NEW HANDLERS HERE!
+	// See note in method comment.
 }
 
-// InstallDebuggingHandlers registers the HTTP request patterns that serve logs or run commands/containers
-func (s *Server) InstallDebuggingHandlers() {
-	klog.InfoS("Adding debug handlers to kubelet server")
-
+// InstallAuthRequiredHandlers registers the HTTP handlers that should only be installed on servers
+// with authorization enabled.
+// NOTE: New endpoints must require authorization.
+func (s *Server) InstallAuthRequiredHandlers() {
 	s.addMetricsBucketMatcher("run")
 	ws := new(restful.WebService)
 	ws.
@@ -576,7 +578,14 @@ func (s *Server) InstallDebuggingHandlers() {
 
 	if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentStatusz) {
 		s.addMetricsBucketMatcher("statusz")
-		statusz.Install(s.restfulCont, ComponentKubelet, statusz.NewRegistry())
+		statusz.Install(s.restfulCont, ComponentKubelet, statusz.NewRegistry(compatibility.DefaultBuildEffectiveVersion()))
+	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(zpagesfeatures.ComponentFlagz) {
+		if s.flagz != nil {
+			s.addMetricsBucketMatcher("flagz")
+			flagz.Install(s.restfulCont, ComponentKubelet, s.flagz)
+		}
 	}
 
 	// The /runningpods endpoint is used for testing only.
@@ -589,6 +598,17 @@ func (s *Server) InstallDebuggingHandlers() {
 		To(s.getRunningPods).
 		Operation("getRunningPods"))
 	s.restfulCont.Add(ws)
+
+	// Only enable checkpoint API if the feature is enabled
+	if utilfeature.DefaultFeatureGate.Enabled(features.ContainerCheckpoint) {
+		s.addMetricsBucketMatcher("checkpoint")
+		ws = &restful.WebService{}
+		ws.Path(checkpointPath).Produces(restful.MIME_JSON)
+		ws.Route(ws.POST("/{podNamespace}/{podID}/{containerName}").
+			To(s.checkpoint).
+			Operation("checkpoint"))
+		s.restfulCont.Add(ws)
+	}
 }
 
 // InstallDebuggingDisabledHandlers registers the HTTP request patterns that provide better error message

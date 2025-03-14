@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp" //nolint:depguard
 	clientset "k8s.io/client-go/kubernetes"
 
 	v1 "k8s.io/api/core/v1"
@@ -40,14 +40,10 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
-	"k8s.io/kubernetes/pkg/kubelet/status/state"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	kubeutil "k8s.io/kubernetes/pkg/kubelet/util"
 	statusutil "k8s.io/kubernetes/pkg/util/pod"
 )
-
-// podStatusManagerStateFile is the file name where status manager stores its state
-const podStatusManagerStateFile = "pod_status_manager_state"
 
 // A wrapper around v1.PodStatus that includes a version to enforce that stale pod statuses are
 // not sent to the API server.
@@ -72,19 +68,16 @@ type manager struct {
 	kubeClient clientset.Interface
 	podManager PodManager
 	// Map from pod UID to sync status of the corresponding pod.
-	podStatuses      map[types.UID]versionedPodStatus
-	podStatusesLock  sync.RWMutex
-	podStatusChannel chan struct{}
+	podStatuses       map[types.UID]versionedPodStatus
+	podResizeStatuses map[types.UID]v1.PodResizeStatus
+	podStatusesLock   sync.RWMutex
+	podStatusChannel  chan struct{}
 	// Map from (mirror) pod UID to latest status version successfully sent to the API server.
 	// apiStatusVersions must only be accessed from the sync thread.
 	apiStatusVersions map[kubetypes.MirrorPodUID]uint64
 	podDeletionSafety PodDeletionSafetyProvider
 
 	podStartupLatencyHelper PodStartupLatencyStateHelper
-	// state allows to save/restore pod resource allocation and tolerate kubelet restarts.
-	state state.State
-	// stateFileDirectory holds the directory where the state file for checkpoints is held.
-	stateFileDirectory string
 }
 
 // PodManager is the subset of methods the manager needs to observe the actual state of the kubelet.
@@ -148,37 +141,21 @@ type Manager interface {
 
 	// SetPodResizeStatus caches the last resizing decision for the pod.
 	SetPodResizeStatus(podUID types.UID, resize v1.PodResizeStatus)
-
-	allocationManager
-}
-
-// TODO(tallclair): Refactor allocation state handling out of the status manager.
-type allocationManager interface {
-	// GetContainerResourceAllocation returns the checkpointed AllocatedResources value for the container
-	GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceRequirements, bool)
-
-	// UpdatePodFromAllocation overwrites the pod spec with the allocation.
-	// This function does a deep copy only if updates are needed.
-	// Returns the updated (or original) pod, and whether there was an allocation stored.
-	UpdatePodFromAllocation(pod *v1.Pod) (*v1.Pod, bool)
-
-	// SetPodAllocation checkpoints the resources allocated to a pod's containers.
-	SetPodAllocation(pod *v1.Pod) error
 }
 
 const syncPeriod = 10 * time.Second
 
 // NewManager returns a functional Manager.
-func NewManager(kubeClient clientset.Interface, podManager PodManager, podDeletionSafety PodDeletionSafetyProvider, podStartupLatencyHelper PodStartupLatencyStateHelper, stateFileDirectory string) Manager {
+func NewManager(kubeClient clientset.Interface, podManager PodManager, podDeletionSafety PodDeletionSafetyProvider, podStartupLatencyHelper PodStartupLatencyStateHelper) Manager {
 	return &manager{
 		kubeClient:              kubeClient,
 		podManager:              podManager,
 		podStatuses:             make(map[types.UID]versionedPodStatus),
+		podResizeStatuses:       make(map[types.UID]v1.PodResizeStatus),
 		podStatusChannel:        make(chan struct{}, 1),
 		apiStatusVersions:       make(map[kubetypes.MirrorPodUID]uint64),
 		podDeletionSafety:       podDeletionSafety,
 		podStartupLatencyHelper: podStartupLatencyHelper,
-		stateFileDirectory:      stateFileDirectory,
 	}
 }
 
@@ -202,20 +179,6 @@ func isPodStatusByKubeletEqual(oldStatus, status *v1.PodStatus) bool {
 }
 
 func (m *manager) Start() {
-	// Initialize m.state to no-op state checkpoint manager
-	m.state = state.NewNoopStateCheckpoint()
-
-	// Create pod allocation checkpoint manager even if client is nil so as to allow local get/set of AllocatedResources & Resize
-	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		stateImpl, err := state.NewStateCheckpoint(m.stateFileDirectory, podStatusManagerStateFile)
-		if err != nil {
-			// This is a crictical, non-recoverable failure.
-			klog.ErrorS(err, "Could not initialize pod allocation checkpoint manager, please drain node and remove policy state file")
-			panic(err)
-		}
-		m.state = stateImpl
-	}
-
 	// Don't start the status manager if we don't have a client. This will happen
 	// on the master, where the kubelet is responsible for bootstrapping the pods
 	// of the master components.
@@ -244,72 +207,18 @@ func (m *manager) Start() {
 	}, 0)
 }
 
-// GetContainerResourceAllocation returns the last checkpointed AllocatedResources values
-// If checkpoint manager has not been initialized, it returns nil, false
-func (m *manager) GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceRequirements, bool) {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	return m.state.GetContainerResourceAllocation(podUID, containerName)
-}
-
-// UpdatePodFromAllocation overwrites the pod spec with the allocation.
-// This function does a deep copy only if updates are needed.
-func (m *manager) UpdatePodFromAllocation(pod *v1.Pod) (*v1.Pod, bool) {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	// TODO(tallclair): This clones the whole cache, but we only need 1 pod.
-	allocs := m.state.GetPodResourceAllocation()
-	return updatePodFromAllocation(pod, allocs)
-}
-
-func updatePodFromAllocation(pod *v1.Pod, allocs state.PodResourceAllocation) (*v1.Pod, bool) {
-	allocated, found := allocs[string(pod.UID)]
-	if !found {
-		return pod, false
-	}
-
-	updated := false
-	for i, c := range pod.Spec.Containers {
-		if cAlloc, ok := allocated[c.Name]; ok {
-			if !apiequality.Semantic.DeepEqual(c.Resources, cAlloc) {
-				// Allocation differs from pod spec, update
-				if !updated {
-					// If this is the first update, copy the pod
-					pod = pod.DeepCopy()
-					updated = true
-				}
-				pod.Spec.Containers[i].Resources = cAlloc
-			}
-		}
-	}
-	return pod, updated
-}
-
 // GetPodResizeStatus returns the last cached ResizeStatus value.
 func (m *manager) GetPodResizeStatus(podUID types.UID) v1.PodResizeStatus {
 	m.podStatusesLock.RLock()
 	defer m.podStatusesLock.RUnlock()
-	return m.state.GetPodResizeStatus(string(podUID))
-}
-
-// SetPodAllocation checkpoints the resources allocated to a pod's containers
-func (m *manager) SetPodAllocation(pod *v1.Pod) error {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	for _, container := range pod.Spec.Containers {
-		alloc := *container.Resources.DeepCopy()
-		if err := m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc); err != nil {
-			return err
-		}
-	}
-	return nil
+	return m.podResizeStatuses[podUID]
 }
 
 // SetPodResizeStatus checkpoints the last resizing decision for the pod.
 func (m *manager) SetPodResizeStatus(podUID types.UID, resizeStatus v1.PodResizeStatus) {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	m.state.SetPodResizeStatus(string(podUID), resizeStatus)
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+	m.podResizeStatuses[podUID] = resizeStatus
 }
 
 func (m *manager) GetPodStatus(uid types.UID) (v1.PodStatus, bool) {
@@ -325,6 +234,9 @@ func (m *manager) SetPodStatus(pod *v1.Pod, status v1.PodStatus) {
 
 	// Make sure we're caching a deep copy.
 	status = *status.DeepCopy()
+
+	// Set the observedGeneration for this pod status.
+	status.ObservedGeneration = podutil.GetPodObservedGenerationIfEnabled(pod)
 
 	// Force a status update if deletion timestamp is set. This is necessary
 	// because if the pod is in the non-running state, the pod worker still
@@ -690,6 +602,11 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		status.StartTime = &now
 	}
 
+	// prevent sending unnecessary patches
+	if oldStatus.ObservedGeneration > status.ObservedGeneration {
+		status.ObservedGeneration = oldStatus.ObservedGeneration
+	}
+
 	normalizeStatus(pod, &status)
 
 	// Perform some more extensive logging of container termination state to assist in
@@ -779,7 +696,7 @@ func (m *manager) deletePodStatus(uid types.UID) {
 	delete(m.podStatuses, uid)
 	m.podStartupLatencyHelper.DeletePodStartupState(uid)
 	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		m.state.Delete(string(uid), "")
+		delete(m.podResizeStatuses, uid)
 	}
 }
 
@@ -792,7 +709,7 @@ func (m *manager) RemoveOrphanedStatuses(podUIDs map[types.UID]bool) {
 			klog.V(5).InfoS("Removing pod from status map.", "podUID", key)
 			delete(m.podStatuses, key)
 			if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-				m.state.Delete(string(key), "")
+				delete(m.podResizeStatuses, key)
 			}
 		}
 	}

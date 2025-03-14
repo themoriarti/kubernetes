@@ -239,20 +239,6 @@ func TestVolumeBinding(t *testing.T) {
 			wantPreScoreStatus: framework.NewStatus(framework.Skip),
 		},
 		{
-			name: "pvc not found",
-			pod:  makePod("pod-a").withPVCVolume("pvc-a", "").Pod,
-			nodes: []*v1.Node{
-				makeNode("node-a").Node,
-			},
-			wantPreFilterStatus: framework.NewStatus(framework.UnschedulableAndUnresolvable, `persistentvolumeclaim "pvc-a" not found`),
-			wantFilterStatus: []*framework.Status{
-				nil,
-			},
-			wantScores: []int64{
-				0,
-			},
-		},
-		{
 			name: "pv not found",
 			pod:  makePod("pod-a").withPVCVolume("pvc-a", "").Pod,
 			nodes: []*v1.Node{
@@ -787,12 +773,7 @@ func TestVolumeBinding(t *testing.T) {
 			t.Log("Verify")
 
 			p := pl.(*VolumeBinding)
-			nodeInfos := make([]*framework.NodeInfo, 0)
-			for _, node := range item.nodes {
-				nodeInfo := framework.NewNodeInfo()
-				nodeInfo.SetNode(node)
-				nodeInfos = append(nodeInfos, nodeInfo)
-			}
+			nodeInfos := tf.BuildNodeInfos(item.nodes)
 			state := framework.NewCycleState()
 
 			t.Logf("Verify: call PreFilter and check status")
@@ -832,7 +813,7 @@ func TestVolumeBinding(t *testing.T) {
 			}
 
 			t.Logf("Verify: call PreScore and check status")
-			gotPreScoreStatus := p.PreScore(ctx, state, item.pod, tf.BuildNodeInfos(item.nodes))
+			gotPreScoreStatus := p.PreScore(ctx, state, item.pod, nodeInfos)
 			if diff := cmp.Diff(item.wantPreScoreStatus, gotPreScoreStatus); diff != "" {
 				t.Errorf("state got after prescore does not match (-want,+got):\n%s", diff)
 			}
@@ -841,13 +822,14 @@ func TestVolumeBinding(t *testing.T) {
 			}
 
 			t.Logf("Verify: Score")
-			for i, node := range item.nodes {
-				score, status := p.Score(ctx, state, item.pod, node.Name)
+			for i, nodeInfo := range nodeInfos {
+				nodeName := nodeInfo.Node().Name
+				score, status := p.Score(ctx, state, item.pod, nodeInfo)
 				if !status.IsSuccess() {
 					t.Errorf("Score expects success status, got: %v", status)
 				}
 				if score != item.wantScores[i] {
-					t.Errorf("Score expects score %d for node %q, got: %d", item.wantScores[i], node.Name, score)
+					t.Errorf("Score expects score %d for node %q, got: %d", item.wantScores[i], nodeName, score)
 				}
 			}
 		})

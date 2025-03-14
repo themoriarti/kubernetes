@@ -530,6 +530,7 @@ type KubeletConfiguration struct {
 	EvictionSoftGracePeriod map[string]string `json:"evictionSoftGracePeriod,omitempty"`
 	// evictionPressureTransitionPeriod is the duration for which the kubelet has to wait
 	// before transitioning out of an eviction pressure condition.
+	// A duration of 0s will be converted to the default value of 5m
 	// Default: "5m"
 	// +optional
 	EvictionPressureTransitionPeriod metav1.Duration `json:"evictionPressureTransitionPeriod,omitempty"`
@@ -546,6 +547,16 @@ type KubeletConfiguration struct {
 	// Default: nil
 	// +optional
 	EvictionMinimumReclaim map[string]string `json:"evictionMinimumReclaim,omitempty"`
+	// mergeDefaultEvictionSettings indicates that defaults for the evictionHard, evictionSoft, evictionSoftGracePeriod, and evictionMinimumReclaim
+	// fields should be merged into values specified for those fields in this configuration.
+	// Signals specified in this configuration take precedence.
+	// Signals not specified in this configuration inherit their defaults.
+	// If false, and if any signal is specified in this configuration then other signals that
+	// are not specified in this configuration will be set to 0.
+	// It applies to merging the fields for which the default exists, and currently only evictionHard has default values.
+	// Default: false
+	// +optional
+	MergeDefaultEvictionSettings *bool `json:"mergeDefaultEvictionSettings,omitempty"`
 	// podsPerCore is the maximum number of pods per core. Cannot exceed maxPods.
 	// The value must be a non-negative integer.
 	// If 0, there is no limit on the number of Pods.
@@ -1003,7 +1014,7 @@ type CredentialProviderConfig struct {
 	// Multiple providers may match against a single image, in which case credentials
 	// from all providers will be returned to the kubelet. If multiple providers are called
 	// for a single image, the results are combined. If providers return overlapping
-	// auth keys, the value from the provider earlier in this list is used.
+	// auth keys, the value from the provider earlier in this list is attempted first.
 	Providers []CredentialProvider `json:"providers"`
 }
 
@@ -1013,6 +1024,7 @@ type CredentialProvider struct {
 	// name is the required name of the credential provider. It must match the name of the
 	// provider executable as seen by the kubelet. The executable must be in the kubelet's
 	// bin directory (set by the --image-credential-provider-bin-dir flag).
+	// Required to be unique across all providers.
 	Name string `json:"name"`
 
 	// matchImages is a required list of strings used to match against images in order to

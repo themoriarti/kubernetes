@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/coordination/v1"
 	v1alpha2 "k8s.io/api/coordination/v1alpha2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -264,6 +265,7 @@ func (c *Controller) reconcileElectionStep(ctx context.Context, leaseNN types.Na
 
 	now := c.clock.Now()
 	canVoteYet := true
+	g, gCtx := errgroup.WithContext(ctx)
 	for _, candidate := range candidates {
 		if candidate.Spec.PingTime != nil && candidate.Spec.PingTime.Add(electionDuration).After(now) &&
 			candidate.Spec.RenewTime != nil && candidate.Spec.RenewTime.Before(candidate.Spec.PingTime) {
@@ -280,16 +282,17 @@ func (c *Controller) reconcileElectionStep(ctx context.Context, leaseNN types.Na
 			// If PingTime is outdated, send another PingTime only if it already acked the first one.
 			// This checks for pingTime <= renewTime because equality is possible in unit tests using a fake clock.
 			(candidate.Spec.PingTime.Add(electionDuration).Before(now) && !candidate.Spec.RenewTime.Before(candidate.Spec.PingTime)) {
-			// TODO(jefftree): We should randomize the order of sending pings and do them in parallel
-			// so that all candidates have equal opportunity to ack.
 			clone := candidate.DeepCopy()
 			clone.Spec.PingTime = &metav1.MicroTime{Time: now}
-			_, err := c.leaseCandidateClient.LeaseCandidates(clone.Namespace).Update(ctx, clone, metav1.UpdateOptions{})
-			if err != nil {
-				return defaultRequeueInterval, err
-			}
+			g.Go(func() error {
+				_, err := c.leaseCandidateClient.LeaseCandidates(clone.Namespace).Update(gCtx, clone, metav1.UpdateOptions{})
+				return err
+			})
 			canVoteYet = false
 		}
+	}
+	if err := g.Wait(); err != nil {
+		return defaultRequeueInterval, err
 	}
 	if !canVoteYet {
 		return defaultRequeueInterval, nil
@@ -374,7 +377,7 @@ func (c *Controller) reconcileElectionStep(ctx context.Context, leaseNN types.Na
 	orig := existing.DeepCopy()
 
 	isExpired := isLeaseExpired(c.clock, existing)
-	noHolderIdentity := leaderLease.Spec.HolderIdentity != nil && existing.Spec.HolderIdentity == nil || *existing.Spec.HolderIdentity == ""
+	noHolderIdentity := leaderLease.Spec.HolderIdentity != nil && (existing.Spec.HolderIdentity == nil || *existing.Spec.HolderIdentity == "")
 	expiredAndNewHolder := isExpired && leaderLease.Spec.HolderIdentity != nil && *existing.Spec.HolderIdentity != *leaderLease.Spec.HolderIdentity
 	strategyChanged := existing.Spec.Strategy == nil || *existing.Spec.Strategy != strategy
 	differentHolder := leaderLease.Spec.HolderIdentity != nil && *leaderLease.Spec.HolderIdentity != *existing.Spec.HolderIdentity
@@ -402,7 +405,11 @@ func (c *Controller) reconcileElectionStep(ctx context.Context, leaseNN types.Na
 	}
 
 	if reflect.DeepEqual(existing, orig) {
-		klog.V(5).Infof("Lease %s already has the most optimal leader %q", leaseNN, *existing.Spec.HolderIdentity)
+		if existing.Spec.HolderIdentity != nil {
+			klog.V(5).Infof("Lease %s is managed by a third party strategy", *existing.Spec.HolderIdentity)
+		} else {
+			klog.V(5).Infof("Lease %s already has the most optimal leader %q", leaseNN, "")
+		}
 		// We need to requeue to ensure that we are aware of an expired lease
 		return defaultRequeueInterval, nil
 	}

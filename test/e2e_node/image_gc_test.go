@@ -29,7 +29,6 @@ import (
 	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
-	"k8s.io/kubernetes/test/e2e/nodefeature"
 	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo/v2"
@@ -43,7 +42,7 @@ const (
 	checkGCFreq  time.Duration = 30 * time.Second
 )
 
-var _ = SIGDescribe("ImageGarbageCollect", framework.WithSerial(), nodefeature.GarbageCollect, feature.GarbageCollect, func() {
+var _ = SIGDescribe("ImageGarbageCollect", framework.WithSerial(), feature.GarbageCollect, func() {
 	f := framework.NewDefaultFramework("image-garbage-collect-test")
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	var is internalapi.ImageManagerService
@@ -74,7 +73,7 @@ var _ = SIGDescribe("ImageGarbageCollect", framework.WithSerial(), nodefeature.G
 			allImages, err := is.ListImages(context.Background(), &runtimeapi.ImageFilter{})
 			framework.ExpectNoError(err)
 
-			e2epod.NewPodClient(f).DeleteSync(ctx, pod.ObjectMeta.Name, metav1.DeleteOptions{}, e2epod.DefaultPodDeletionTimeout)
+			e2epod.NewPodClient(f).DeleteSync(ctx, pod.ObjectMeta.Name, metav1.DeleteOptions{}, f.Timeouts.PodDelete)
 
 			// Even though the image gc max timing is less, we are bound by the kubelet's
 			// ImageGCPeriod, which is hardcoded to 5 minutes.
@@ -94,7 +93,7 @@ var _ = SIGDescribe("ImageGarbageCollect", framework.WithSerial(), nodefeature.G
 			allImages, err := is.ListImages(context.Background(), &runtimeapi.ImageFilter{})
 			framework.ExpectNoError(err)
 
-			e2epod.NewPodClient(f).DeleteSync(ctx, pod.ObjectMeta.Name, metav1.DeleteOptions{}, e2epod.DefaultPodDeletionTimeout)
+			e2epod.NewPodClient(f).DeleteSync(ctx, pod.ObjectMeta.Name, metav1.DeleteOptions{}, f.Timeouts.PodDelete)
 
 			restartKubelet(ctx, true)
 

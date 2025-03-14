@@ -33,7 +33,9 @@ import (
 	"testing"
 	"time"
 
+	guuid "github.com/google/uuid"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -56,10 +58,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utiljson "k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/handlers"
 	"k8s.io/apiserver/pkg/storage/storagebackend"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -70,7 +74,6 @@ import (
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/pager"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
-	utilversion "k8s.io/component-base/version"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
@@ -80,6 +83,7 @@ import (
 	"k8s.io/kubernetes/test/integration/etcd"
 	"k8s.io/kubernetes/test/integration/framework"
 	"k8s.io/kubernetes/test/utils/ktesting"
+	"k8s.io/utils/ptr"
 )
 
 func setup(t *testing.T, groupVersions ...schema.GroupVersion) (context.Context, clientset.Interface, *restclient.Config, framework.TearDownFunc) {
@@ -386,59 +390,66 @@ func TestListOptions(t *testing.T) {
 	for _, watchCacheEnabled := range []bool{true, false} {
 		t.Run(fmt.Sprintf("watchCacheEnabled=%t", watchCacheEnabled), func(t *testing.T) {
 			tCtx := ktesting.Init(t)
-
-			var storageTransport *storagebackend.TransportConfig
-			clientSet, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
-				ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
-					opts.Etcd.EnableWatchCache = watchCacheEnabled
-					storageTransport = &opts.Etcd.StorageConfig.Transport
-				},
-			})
-			defer tearDownFn()
-
-			ns := framework.CreateNamespaceOrDie(clientSet, "list-options", t)
-			defer framework.DeleteNamespaceOrDie(clientSet, ns, t)
-
-			rsClient := clientSet.AppsV1().ReplicaSets(ns.Name)
-
-			var compactedRv, oldestUncompactedRv string
-			for i := 0; i < 15; i++ {
-				rs := newRS(ns.Name)
-				rs.Name = fmt.Sprintf("test-%d", i)
-				created, err := rsClient.Create(tCtx, rs, metav1.CreateOptions{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if i == 0 {
-					compactedRv = created.ResourceVersion // We compact this first resource version below
-				}
-				// delete the first 5, and then compact them
-				if i < 5 {
-					var zero int64
-					if err := rsClient.Delete(tCtx, rs.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero}); err != nil {
-						t.Fatal(err)
-					}
-					oldestUncompactedRv = created.ResourceVersion
-				}
+			prefix := path.Join("/", guuid.New().String(), "registry")
+			etcdConfig := storagebackend.Config{
+				Prefix:    prefix,
+				Transport: storagebackend.TransportConfig{ServerList: []string{framework.GetEtcdURL()}},
 			}
-
-			// compact some of the revision history in etcd so we can test "too old" resource versions
-			rawClient, kvClient, err := integration.GetEtcdClients(*storageTransport)
+			rawClient, kvClient, err := integration.GetEtcdClients(etcdConfig.Transport)
 			if err != nil {
 				t.Fatal(err)
 			}
 			// kvClient is a wrapper around rawClient and to avoid leaking goroutines we need to
 			// close the client (which we can do by closing rawClient).
-			defer rawClient.Close()
+			defer func() {
+				err := rawClient.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}()
 
-			revision, err := strconv.Atoi(oldestUncompactedRv)
+			var compactedRv string
+			var oldestUncompactedRv int64
+			for i := 0; i < 15; i++ {
+				rs := newRS("default")
+				rs.Name = fmt.Sprintf("test-%d", i)
+				serializer := protobuf.NewSerializer(nil, nil)
+				buf := bytes.Buffer{}
+				err := serializer.Encode(rs, &buf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key := prefix + "/replicasets/default/" + rs.Name
+
+				resp, err := kvClient.Put(tCtx, key, buf.String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if i == 0 {
+					compactedRv = strconv.FormatInt(resp.Header.Revision, 10) // We compact this first resource version below
+				}
+				// delete the first 5, and then compact them
+				if i < 5 {
+					if _, err := kvClient.Delete(tCtx, key); err != nil {
+						t.Fatal(err)
+					}
+					oldestUncompactedRv = resp.Header.Revision
+				}
+			}
+			_, err = kvClient.Compact(tCtx, int64(oldestUncompactedRv))
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = kvClient.Compact(tCtx, int64(revision))
-			if err != nil {
-				t.Fatal(err)
-			}
+
+			clientSet, _, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
+				ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
+					opts.Etcd.EnableWatchCache = watchCacheEnabled
+					opts.Etcd.StorageConfig = etcdConfig
+				},
+			})
+			defer tearDownFn()
+
+			rsClient := clientSet.AppsV1().ReplicaSets("default")
 
 			listObj, err := rsClient.List(tCtx, metav1.ListOptions{
 				Limit: 6,
@@ -1674,6 +1685,205 @@ func TestGetSubresourcesAsTables(t *testing.T) {
 				t.Fatalf("Expected Kind 'Table', got '%v'", actualKind)
 			}
 		})
+	}
+}
+
+func TestGetScaleSubresourceAsTableForAllBuiltins(t *testing.T) {
+	// KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE allows for APIs pending removal to not block tests
+	t.Setenv("KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE", "true")
+
+	// Enable all features and apis for testing
+	flags := framework.DefaultTestServerFlags()
+	flags = append(flags, "--runtime-config=api/all=true")
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllAlpha", true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllBeta", true)
+
+	testNamespace := "test-scale"
+	server := kubeapiservertesting.StartTestServerOrDie(t, nil, flags, framework.SharedEtcd())
+	defer server.TearDownFn()
+
+	clientset := clientset.NewForConfigOrDie(server.ClientConfig)
+
+	ns := framework.CreateNamespaceOrDie(clientset, testNamespace, t)
+	defer framework.DeleteNamespaceOrDie(clientset, ns, t)
+
+	scaleResources := map[string]runtime.Object{
+		"deployments.apps/v1": &apps.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.DeploymentSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"replicasets.apps/v1": &apps.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.ReplicaSetSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"statefulsets.apps/v1": &apps.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: apps.StatefulSetSpec{
+				ServiceName: "dummy",
+				Replicas:    ptr.To[int32](1),
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"app": "dummy",
+					},
+				},
+				Template: v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+		"replicationcontrollers.v1": &v1.ReplicationController{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dummy",
+			},
+			Spec: v1.ReplicationControllerSpec{
+				Replicas: ptr.To[int32](1),
+				Selector: map[string]string{
+					"app": "dummy",
+				},
+				Template: &v1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "dummy",
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name:  "dummy-container",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, serverResources, err := clientset.Discovery().ServerGroupsAndResources()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, resourceList := range serverResources {
+		for _, resource := range resourceList.APIResources {
+			if !strings.Contains(resource.Name, "/scale") {
+				continue
+			}
+			resourceName := strings.Split(resource.Name, "/")[0]
+			// we can safely skip error here, since the group version is coming from the server
+			groupVersion, _ := schema.ParseGroupVersion(resourceList.GroupVersion)
+
+			t.Run(resourceName, func(t *testing.T) {
+				_, ctx := ktesting.NewTestContext(t)
+				scaleResourceObjName := fmt.Sprintf("%s.%s", resourceName, resourceList.GroupVersion)
+				obj, ok := scaleResources[scaleResourceObjName]
+				if !ok {
+					t.Fatalf("sample resource for %s not found in scaleResources", scaleResourceObjName)
+				}
+
+				cfg := dynamic.ConfigFor(server.ClientConfig)
+				if len(groupVersion.Group) == 0 {
+					cfg = dynamic.ConfigFor(server.ClientConfig)
+					cfg.APIPath = "/api"
+				} else {
+					cfg.APIPath = "/apis"
+				}
+				cfg.GroupVersion = &groupVersion
+				client, err := restclient.RESTClientFor(cfg)
+				if err != nil {
+					t.Fatalf("failed to create RESTClient: %v", err)
+				}
+
+				err = client.Post().
+					NamespaceIfScoped(testNamespace, resource.Namespaced).Resource(resourceName).
+					VersionedParams(&metav1.CreateOptions{}, metav1.ParameterCodec).
+					Body(obj).Do(ctx).Error()
+				if err != nil {
+					t.Fatalf("failed to create object: %v", err)
+				}
+
+				metaAccessor, err := meta.Accessor(obj)
+				if err != nil {
+					t.Fatalf("failed to get metadata accessor: %v", err)
+				}
+				res := client.Get().
+					NamespaceIfScoped(testNamespace, resource.Namespaced).Resource(resourceName).
+					SetHeader("Accept", "application/json;as=Table;g=meta.k8s.io;v=v1").
+					Name(metaAccessor.GetName()).
+					SubResource("scale").
+					Do(ctx)
+				resObj, err := res.Get()
+				if err != nil {
+					t.Fatalf("failed to retrieve object from response: %v", err)
+				}
+				actualKind := resObj.GetObjectKind().GroupVersionKind().Kind
+				if actualKind != "Table" {
+					t.Fatalf("Expected Kind 'Table', got '%v'", actualKind)
+				}
+			})
+		}
 	}
 }
 
@@ -3000,8 +3210,7 @@ func TestEmulatedStorageVersion(t *testing.T) {
 	for emulatedVersion, cases := range groupedCases {
 		t.Run(emulatedVersion, func(t *testing.T) {
 			server := kubeapiservertesting.StartTestServerOrDie(
-				t, &kubeapiservertesting.TestServerInstanceOptions{BinaryVersion: emulatedVersion},
-				[]string{"--emulated-version=kube=" + emulatedVersion, `--storage-media-type=application/json`}, framework.SharedEtcd())
+				t, nil, []string{"--emulated-version=kube=" + emulatedVersion, `--storage-media-type=application/json`, fmt.Sprintf("--runtime-config=%s=true", admissionregistrationv1beta1.SchemeGroupVersion)}, framework.SharedEtcd())
 			defer server.TearDownFn()
 
 			client := clientset.NewForConfigOrDie(server.ClientConfig)
@@ -3104,7 +3313,7 @@ func TestAllowedEmulationVersions(t *testing.T) {
 	}{
 		{
 			name:             "default",
-			emulationVersion: utilversion.DefaultKubeEffectiveVersion().EmulationVersion().String(),
+			emulationVersion: compatibility.DefaultKubeEffectiveVersionForTest().EmulationVersion().String(),
 		},
 	}
 
@@ -3139,9 +3348,10 @@ func TestAllowedEmulationVersions(t *testing.T) {
 }
 
 func TestEnableEmulationVersion(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
 	server := kubeapiservertesting.StartTestServerOrDie(t,
 		&kubeapiservertesting.TestServerInstanceOptions{BinaryVersion: "1.32"},
-		[]string{"--emulated-version=kube=1.31"}, framework.SharedEtcd())
+		[]string{"--emulated-version=kube=1.31", "--runtime-config=api/beta=true"}, framework.SharedEtcd())
 	defer server.TearDownFn()
 
 	rt, err := restclient.TransportFor(server.ClientConfig)
@@ -3200,6 +3410,7 @@ func TestEnableEmulationVersion(t *testing.T) {
 }
 
 func TestDisableEmulationVersion(t *testing.T) {
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
 	server := kubeapiservertesting.StartTestServerOrDie(t,
 		&kubeapiservertesting.TestServerInstanceOptions{BinaryVersion: "1.32"},
 		[]string{}, framework.SharedEtcd())

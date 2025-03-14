@@ -32,7 +32,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/types"
 
 	"github.com/google/go-cmp/cmp"
-	libcontainercgroups "github.com/opencontainers/runc/libcontainer/cgroups"
+	libcontainercgroups "github.com/opencontainers/cgroups"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -408,7 +408,7 @@ func TestCalculateLinuxResources(t *testing.T) {
 	for _, test := range tests {
 		setCgroupVersionDuringTest(test.cgroupVersion)
 		m.singleProcessOOMKill = ptr.To(test.singleProcessOOMKill)
-		linuxContainerResources := m.calculateLinuxResources(test.cpuReq, test.cpuLim, test.memLim)
+		linuxContainerResources := m.calculateLinuxResources(test.cpuReq, test.cpuLim, test.memLim, false)
 		assert.Equal(t, test.expected, linuxContainerResources)
 	}
 }

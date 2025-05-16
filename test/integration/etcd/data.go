@@ -241,10 +241,20 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, removeAl
 		},
 		// --
 
+		// k8s.io/kubernetes/pkg/apis/coordination/v1beta1
+		gvr("coordination.k8s.io", "v1beta1", "leasecandidates"): {
+			Stub:              `{"metadata": {"name": "leasecandidatev1beta1"}, "spec": {"leaseName": "lease", "binaryVersion": "0.1.0", "emulationVersion": "0.1.0", "strategy": "OldestEmulationVersion"}}`,
+			ExpectedEtcdPath:  "/registry/leasecandidates/" + namespace + "/leasecandidatev1beta1",
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
+		// --
+
 		// k8s.io/kubernetes/pkg/apis/coordination/v1alpha2
 		gvr("coordination.k8s.io", "v1alpha2", "leasecandidates"): {
 			Stub:              `{"metadata": {"name": "leasecandidatev1alpha2"}, "spec": {"leaseName": "lease", "binaryVersion": "0.1.0", "emulationVersion": "0.1.0", "strategy": "OldestEmulationVersion"}}`,
 			ExpectedEtcdPath:  "/registry/leasecandidates/" + namespace + "/leasecandidatev1alpha2",
+			ExpectedGVK:       gvkP("coordination.k8s.io", "v1beta1", "LeaseCandidate"),
 			IntroducedVersion: "1.32",
 			RemovedVersion:    "1.38",
 		},
@@ -578,6 +588,12 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, removeAl
 			IntroducedVersion: "1.31",
 			RemovedVersion:    "1.37",
 		},
+		gvr("resource.k8s.io", "v1alpha3", "devicetaintrules"): {
+			Stub:              `{"metadata": {"name": "taint1name"}, "spec": {"taint": {"key": "example.com/taintkey", "value": "taintvalue", "effect": "NoSchedule"}}}`,
+			ExpectedEtcdPath:  "/registry/devicetaintrules/taint1name",
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
 		// --
 
 		// k8s.io/kubernetes/pkg/apis/resource/v1beta1
@@ -607,6 +623,37 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, removeAl
 		},
 		// --
 
+		// k8s.io/kubernetes/pkg/apis/resource/v1beta2
+		gvr("resource.k8s.io", "v1beta2", "deviceclasses"): {
+			Stub:              `{"metadata": {"name": "class3name"}}`,
+			ExpectedEtcdPath:  "/registry/deviceclasses/class3name",
+			ExpectedGVK:       gvkP("resource.k8s.io", "v1beta1", "DeviceClass"),
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
+		gvr("resource.k8s.io", "v1beta2", "resourceclaims"): {
+			Stub:              `{"metadata": {"name": "claim3name"}, "spec": {"devices": {"requests": [{"name": "req-0", "exactly": {"deviceClassName": "example-class", "allocationMode": "ExactCount", "count": 1}}]}}}`,
+			ExpectedEtcdPath:  "/registry/resourceclaims/" + namespace + "/claim3name",
+			ExpectedGVK:       gvkP("resource.k8s.io", "v1beta1", "ResourceClaim"),
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
+		gvr("resource.k8s.io", "v1beta2", "resourceclaimtemplates"): {
+			Stub:              `{"metadata": {"name": "claimtemplate3name"}, "spec": {"spec": {"devices": {"requests": [{"name": "req-0", "exactly": {"deviceClassName": "example-class", "allocationMode": "ExactCount", "count": 1}}]}}}}`,
+			ExpectedEtcdPath:  "/registry/resourceclaimtemplates/" + namespace + "/claimtemplate3name",
+			ExpectedGVK:       gvkP("resource.k8s.io", "v1beta1", "ResourceClaimTemplate"),
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
+		gvr("resource.k8s.io", "v1beta2", "resourceslices"): {
+			Stub:              `{"metadata": {"name": "node3slice"}, "spec": {"nodeName": "worker1", "driver": "dra.example.com", "pool": {"name": "worker1", "resourceSliceCount": 1}}}`,
+			ExpectedEtcdPath:  "/registry/resourceslices/node3slice",
+			ExpectedGVK:       gvkP("resource.k8s.io", "v1beta1", "ResourceSlice"),
+			IntroducedVersion: "1.33",
+			RemovedVersion:    "1.39",
+		},
+		// --
+
 		// k8s.io/apiserver/pkg/apis/apiserverinternal/v1alpha1
 		gvr("internal.apiserver.k8s.io", "v1alpha1", "storageversions"): {
 			Stub:             `{"metadata":{"name":"sv1.test"},"spec":{}}`,
@@ -631,15 +678,35 @@ func GetEtcdStorageDataForNamespaceServedAt(namespace string, v string, removeAl
 		// --
 	}
 
+	// get the min version the Beta api of a group is introduced, and it would be used to determine emulation forward compatibility.
+	minBetaVersions := map[schema.GroupResource]*version.Version{}
+	for key, data := range etcdStorageData {
+		if !strings.Contains(key.Version, "beta") {
+			continue
+		}
+		introduced := version.MustParse(data.IntroducedVersion)
+		if ver, ok := minBetaVersions[key.GroupResource()]; ok {
+			if introduced.LessThan(ver) {
+				minBetaVersions[key.GroupResource()] = introduced
+			}
+		} else {
+			minBetaVersions[key.GroupResource()] = introduced
+		}
+	}
+
 	// Delete types no longer served or not yet added at a particular emulated version.
 	for key, data := range etcdStorageData {
-		if data.IntroducedVersion != "" && version.MustParse(data.IntroducedVersion).GreaterThan(version.MustParse(v)) {
-			delete(etcdStorageData, key)
-		}
-
 		if data.RemovedVersion != "" && version.MustParse(v).AtLeast(version.MustParse(data.RemovedVersion)) {
 			delete(etcdStorageData, key)
 		}
+		if data.IntroducedVersion == "" || version.MustParse(v).AtLeast(version.MustParse(data.IntroducedVersion)) {
+			continue
+		}
+		minBetaVersion, ok := minBetaVersions[key.GroupResource()]
+		if ok && version.MustParse(v).AtLeast(minBetaVersion) {
+			continue
+		}
+		delete(etcdStorageData, key)
 	}
 
 	if removeAlphas {

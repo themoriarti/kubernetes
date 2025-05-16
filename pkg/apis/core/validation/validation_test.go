@@ -8279,6 +8279,8 @@ func TestValidateEphemeralContainers(t *testing.T) {
 func TestValidateWindowsPodSecurityContext(t *testing.T) {
 	validWindowsSC := &core.PodSecurityContext{WindowsOptions: &core.WindowsSecurityContextOptions{RunAsUserName: ptr.To("dummy")}}
 	invalidWindowsSC := &core.PodSecurityContext{SELinuxOptions: &core.SELinuxOptions{Role: "dummyRole"}}
+	invalidWindowsSC2 := &core.PodSecurityContext{SupplementalGroupsPolicy: ptr.To(core.SupplementalGroupsPolicyStrict)}
+
 	cases := map[string]struct {
 		podSec      *core.PodSpec
 		expectErr   bool
@@ -8289,8 +8291,14 @@ func TestValidateWindowsPodSecurityContext(t *testing.T) {
 			podSec:    &core.PodSpec{SecurityContext: validWindowsSC},
 			expectErr: false,
 		},
-		"invalid SC, windows, error": {
+		"invalid SC(by SELinuxOptions), windows, error": {
 			podSec:      &core.PodSpec{SecurityContext: invalidWindowsSC},
+			errorType:   "FieldValueForbidden",
+			errorDetail: "cannot be set for a windows pod",
+			expectErr:   true,
+		},
+		"invalid SC(by SupplementalGroupsPolicy), windows, error": {
+			podSec:      &core.PodSpec{SecurityContext: invalidWindowsSC2},
 			errorType:   "FieldValueForbidden",
 			errorDetail: "cannot be set for a windows pod",
 			expectErr:   true,
@@ -8364,6 +8372,7 @@ func TestValidateLinuxPodSecurityContext(t *testing.T) {
 
 func TestValidateContainers(t *testing.T) {
 	volumeDevices := make(map[string]core.VolumeSource)
+	podOS := &core.PodOS{Name: core.OSName(v1.Linux)}
 	capabilities.ResetForTest()
 	capabilities.Initialize(capabilities.Capabilities{
 		AllowPrivileged: true,
@@ -8560,11 +8569,19 @@ func TestValidateContainers(t *testing.T) {
 				{ResourceName: "memory", RestartPolicy: "NotRequired"},
 				{ResourceName: "cpu", RestartPolicy: "RestartContainer"},
 			},
+		}, {
+			Name:                     "container-with-stopsignal-lifecycle",
+			Image:                    "image",
+			ImagePullPolicy:          "IfNotPresent",
+			TerminationMessagePolicy: "File",
+			Lifecycle: &core.Lifecycle{
+				StopSignal: ptr.To(core.SIGTERM),
+			},
 		},
 	}
 
 	var PodRestartPolicy core.RestartPolicy = "Always"
-	if errs := validateContainers(successCase, volumeDevices, nil, defaultGracePeriod, field.NewPath("field"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace); len(errs) != 0 {
+	if errs := validateContainers(successCase, podOS, volumeDevices, nil, defaultGracePeriod, field.NewPath("field"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace); len(errs) != 0 {
 		t.Errorf("expected success: %v", errs)
 	}
 
@@ -9179,7 +9196,7 @@ func TestValidateContainers(t *testing.T) {
 
 	for _, tc := range errorCases {
 		t.Run(tc.title+"__@L"+tc.line, func(t *testing.T) {
-			errs := validateContainers(tc.containers, volumeDevices, nil, defaultGracePeriod, field.NewPath("containers"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace)
+			errs := validateContainers(tc.containers, podOS, volumeDevices, nil, defaultGracePeriod, field.NewPath("containers"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace)
 			if len(errs) == 0 {
 				t.Fatal("expected error but received none")
 			}
@@ -9194,6 +9211,7 @@ func TestValidateContainers(t *testing.T) {
 
 func TestValidateInitContainers(t *testing.T) {
 	volumeDevices := make(map[string]core.VolumeSource)
+	podOS := &core.PodOS{Name: core.OSName(v1.Linux)}
 	capabilities.ResetForTest()
 	capabilities.Initialize(capabilities.Capabilities{
 		AllowPrivileged: true,
@@ -9277,7 +9295,7 @@ func TestValidateInitContainers(t *testing.T) {
 	},
 	}
 	var PodRestartPolicy core.RestartPolicy = "Never"
-	if errs := validateInitContainers(successCase, containers, volumeDevices, nil, defaultGracePeriod, field.NewPath("field"), PodValidationOptions{AllowSidecarResizePolicy: true}, &PodRestartPolicy, noUserNamespace); len(errs) != 0 {
+	if errs := validateInitContainers(successCase, podOS, containers, volumeDevices, nil, defaultGracePeriod, field.NewPath("field"), PodValidationOptions{AllowSidecarResizePolicy: true}, &PodRestartPolicy, noUserNamespace); len(errs) != 0 {
 		t.Errorf("expected success: %v", errs)
 	}
 
@@ -9671,7 +9689,7 @@ func TestValidateInitContainers(t *testing.T) {
 
 	for _, tc := range errorCases {
 		t.Run(tc.title+"__@L"+tc.line, func(t *testing.T) {
-			errs := validateInitContainers(tc.initContainers, containers, volumeDevices, nil, defaultGracePeriod, field.NewPath("initContainers"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace)
+			errs := validateInitContainers(tc.initContainers, podOS, containers, volumeDevices, nil, defaultGracePeriod, field.NewPath("initContainers"), PodValidationOptions{}, &PodRestartPolicy, noUserNamespace)
 			if len(errs) == 0 {
 				t.Fatal("expected error but received none")
 			}
@@ -10097,6 +10115,9 @@ func TestValidatePodSpec(t *testing.T) {
 	goodfsGroupChangePolicy := core.FSGroupChangeAlways
 	badfsGroupChangePolicy1 := core.PodFSGroupChangePolicy("invalid")
 	badfsGroupChangePolicy2 := core.PodFSGroupChangePolicy("")
+	goodSupplementalGroupsPolicy := core.SupplementalGroupsPolicyStrict
+	badSupplementalGroupsPolicy1 := core.SupplementalGroupsPolicy("invalid")
+	badSupplementalGroupsPolicy2 := core.SupplementalGroupsPolicy("")
 
 	successCases := map[string]*core.Pod{
 		"populate basic fields, leave defaults for most": podtest.MakePod(""),
@@ -10204,6 +10225,11 @@ func TestValidatePodSpec(t *testing.T) {
 			podtest.SetContainers(podtest.MakeContainer("ctr", podtest.SetContainerResizePolicy(
 				core.ContainerResizePolicy{ResourceName: "cpu", RestartPolicy: "NotRequired"}),
 			)),
+		),
+		"populate SupplementalGroupsPolicy": podtest.MakePod("",
+			podtest.SetSecurityContext(&core.PodSecurityContext{
+				SupplementalGroupsPolicy: &goodSupplementalGroupsPolicy,
+			}),
 		),
 	}
 	for k, v := range successCases {
@@ -10342,6 +10368,16 @@ func TestValidatePodSpec(t *testing.T) {
 		"bad invalid fsgroupchangepolicy": *podtest.MakePod("",
 			podtest.SetSecurityContext(&core.PodSecurityContext{
 				FSGroupChangePolicy: &badfsGroupChangePolicy1,
+			}),
+		),
+		"bad empty SupplementalGroupsPolicy": *podtest.MakePod("",
+			podtest.SetSecurityContext(&core.PodSecurityContext{
+				SupplementalGroupsPolicy: &badSupplementalGroupsPolicy2,
+			}),
+		),
+		"bad invalid SupplementalGroupsPolicy": *podtest.MakePod("",
+			podtest.SetSecurityContext(&core.PodSecurityContext{
+				SupplementalGroupsPolicy: &badSupplementalGroupsPolicy1,
 			}),
 		),
 	}
@@ -11024,6 +11060,22 @@ func TestValidatePod(t *testing.T) {
 					},
 				},
 			}),
+		),
+		"Pod with valid StopSignal and valid OS": *podtest.MakePod("test-pod",
+			podtest.SetOS(core.Linux),
+			podtest.SetContainers(podtest.MakeContainer(
+				"test-container",
+				podtest.SetContainerImage("image"),
+				podtest.SetContainerLifecycle(core.Lifecycle{StopSignal: ptr.To(core.SIGTERM)}),
+			)),
+		),
+		"Pod with valid StopSignal and valid OS (Windows)": *podtest.MakePod("test-pod",
+			podtest.SetOS(core.Windows),
+			podtest.SetContainers(podtest.MakeContainer(
+				"test-container",
+				podtest.SetContainerImage("image"),
+				podtest.SetContainerLifecycle(core.Lifecycle{StopSignal: ptr.To(core.SIGTERM)}),
+			)),
 		),
 	}
 
@@ -12362,6 +12414,27 @@ func TestValidatePod(t *testing.T) {
 							}},
 						}},
 				}),
+			),
+		},
+		"Pod with a StopSignal without `spec.os.name`": {
+			expectedError: "spec.containers[0].lifecycle.stopSignal: Forbidden: may not be set for containers with empty `spec.os.name`",
+			spec: *podtest.MakePod("test-pod",
+				podtest.SetContainers(podtest.MakeContainer(
+					"test-container",
+					podtest.SetContainerImage("image"),
+					podtest.SetContainerLifecycle(core.Lifecycle{StopSignal: ptr.To(core.SIGTERM)}),
+				)),
+			),
+		},
+		"Pod with a StopSignal not supported by OS": {
+			expectedError: "spec.containers[0].lifecycle.stopSignal: Unsupported value: \"SIGHUP\": supported values: \"SIGKILL\", \"SIGTERM\"",
+			spec: *podtest.MakePod("test-pod",
+				podtest.SetOS(core.Windows),
+				podtest.SetContainers(podtest.MakeContainer(
+					"test-container",
+					podtest.SetContainerImage("image"),
+					podtest.SetContainerLifecycle(core.Lifecycle{StopSignal: ptr.To(core.SIGHUP)}),
+				)),
 			),
 		},
 	}
@@ -14745,6 +14818,253 @@ func TestValidatePodStatusUpdate(t *testing.T) {
 		),
 		"",
 		"qosClass no change",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetContainerStatuses(core.ContainerStatus{}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"nil containerUser in containerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"empty containerUser in containerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                0,
+								GID:                0,
+								SupplementalGroups: []int64{0, 100},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"containerUser with valid ids in containerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                -1,
+								GID:                -1,
+								SupplementalGroups: []int64{-1},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		`status.containerStatuses[0].user.linux.uid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.containerStatuses[0].user.linux.gid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.containerStatuses[0].user.linux.supplementalGroups[0]: Invalid value: -1: must be between 0 and 2147483647, inclusive`,
+		"containerUser with invalid uids/gids/supplementalGroups in containerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+		),
+		`status.containerStatuses[0].user.linux: Forbidden: cannot be set for a windows pod`,
+		"containerUser cannot be set for windows pod in containerStatuses",
+	}, {
+
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetInitContainerStatuses(core.ContainerStatus{}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"nil containerUser in initContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetInitContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"empty containerUser in initContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetInitContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                0,
+								GID:                0,
+								SupplementalGroups: []int64{0, 100},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"containerUser with valid ids in initContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetInitContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                -1,
+								GID:                -1,
+								SupplementalGroups: []int64{-1},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		`status.initContainerStatuses[0].user.linux.uid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.initContainerStatuses[0].user.linux.gid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.initContainerStatuses[0].user.linux.supplementalGroups[0]: Invalid value: -1: must be between 0 and 2147483647, inclusive`,
+		"containerUser with invalid uids/gids/supplementalGroups in initContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetInitContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+		),
+		`status.initContainerStatuses[0].user.linux: Forbidden: cannot be set for a windows pod`,
+		"containerUser cannot be set for windows pod in initContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetEphemeralContainerStatuses(core.ContainerStatus{}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"nil containerUser in ephemeralContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetEphemeralContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"empty containerUser in ephemeralContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetEphemeralContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                0,
+								GID:                0,
+								SupplementalGroups: []int64{0, 100},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		"",
+		"containerUser with valid ids in ephemeralContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetEphemeralContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{
+								UID:                -1,
+								GID:                -1,
+								SupplementalGroups: []int64{-1},
+							},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo"),
+		`status.ephemeralContainerStatuses[0].user.linux.uid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.ephemeralContainerStatuses[0].user.linux.gid: Invalid value: -1: must be between 0 and 2147483647, inclusive` +
+			`, status.ephemeralContainerStatuses[0].user.linux.supplementalGroups[0]: Invalid value: -1: must be between 0 and 2147483647, inclusive`,
+		"containerUser with invalid uids/gids/supplementalGroups in ephemeralContainerStatuses",
+	}, {
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+			podtest.SetStatus(
+				podtest.MakePodStatus(
+					podtest.SetEphemeralContainerStatuses(core.ContainerStatus{
+						User: &core.ContainerUser{
+							Linux: &core.LinuxContainerUser{},
+						},
+					}),
+				),
+			),
+		),
+		*podtest.MakePod("foo",
+			podtest.SetOS(core.Windows),
+		),
+		`status.ephemeralContainerStatuses[0].user.linux: Forbidden: cannot be set for a windows pod`,
+		"containerUser cannot be set for windows pod in ephemeralContainerStatuses",
 	},
 	}
 
@@ -16414,9 +16734,35 @@ func TestValidateServiceCreate(t *testing.T) {
 			},
 			numErrs: 0,
 		}, {
+			name: "valid: trafficDistribution field set to PreferSameZone with feature gate",
+			tweakSvc: func(s *core.Service) {
+				s.Spec.TrafficDistribution = ptr.To("PreferSameZone")
+			},
+			featureGates: []featuregate.Feature{features.PreferSameTrafficDistribution},
+			numErrs:      0,
+		}, {
+			name: "valid: trafficDistribution field set to PreferSameNode with feature gate",
+			tweakSvc: func(s *core.Service) {
+				s.Spec.TrafficDistribution = ptr.To("PreferSameNode")
+			},
+			featureGates: []featuregate.Feature{features.PreferSameTrafficDistribution},
+			numErrs:      0,
+		}, {
 			name: "invalid: trafficDistribution field set to Random",
 			tweakSvc: func(s *core.Service) {
 				s.Spec.TrafficDistribution = ptr.To("Random")
+			},
+			numErrs: 1,
+		}, {
+			name: "invalid: trafficDistribution field set to PreferSameZone without feature gate",
+			tweakSvc: func(s *core.Service) {
+				s.Spec.TrafficDistribution = ptr.To("PreferSameZone")
+			},
+			numErrs: 1,
+		}, {
+			name: "invalid: trafficDistribution field set to PreferSameNode without feature gate",
+			tweakSvc: func(s *core.Service) {
+				s.Spec.TrafficDistribution = ptr.To("PreferSameNode")
 			},
 			numErrs: 1,
 		},
@@ -16670,7 +17016,7 @@ func TestValidateReplicationControllerStatusUpdate(t *testing.T) {
 		update: core.ReplicationController{
 			ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 			Spec: core.ReplicationControllerSpec{
-				Replicas: 3,
+				Replicas: ptr.To[int32](3),
 				Selector: validSelector,
 				Template: &validPodTemplate.Template,
 			},
@@ -16702,7 +17048,7 @@ func TestValidateReplicationControllerStatusUpdate(t *testing.T) {
 			update: core.ReplicationController{
 				ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 				Spec: core.ReplicationControllerSpec{
-					Replicas: 2,
+					Replicas: ptr.To[int32](2),
 					Selector: validSelector,
 					Template: &validPodTemplate.Template,
 				},
@@ -16725,7 +17071,7 @@ func mkValidReplicationController(tweaks ...func(rc *core.ReplicationController)
 	rc := core.ReplicationController{
 		ObjectMeta: metav1.ObjectMeta{Name: "abc", Namespace: metav1.NamespaceDefault},
 		Spec: core.ReplicationControllerSpec{
-			Replicas: 1,
+			Replicas: ptr.To[int32](1),
 			Selector: map[string]string{"a": "b"},
 			Template: &core.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -16748,17 +17094,27 @@ func TestValidateReplicationControllerUpdate(t *testing.T) {
 	}{{
 		old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
 		update: mkValidReplicationController(func(rc *core.ReplicationController) {
-			rc.Spec.Replicas = 0
+			rc.Spec.Replicas = ptr.To[int32](0)
 		}),
 	}, {
 		old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
 		update: mkValidReplicationController(func(rc *core.ReplicationController) {
-			rc.Spec.Replicas = 3
+			rc.Spec.Replicas = ptr.To[int32](3)
 		}),
 	}, {
 		old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
 		update: mkValidReplicationController(func(rc *core.ReplicationController) {
-			rc.Spec.Replicas = 2
+			rc.Spec.MinReadySeconds = 0
+		}),
+	}, {
+		old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
+		update: mkValidReplicationController(func(rc *core.ReplicationController) {
+			rc.Spec.MinReadySeconds = 3
+		}),
+	}, {
+		old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
+		update: mkValidReplicationController(func(rc *core.ReplicationController) {
+			rc.Spec.Replicas = ptr.To[int32](2)
 			rc.Spec.Template.Spec = podtest.MakePodSpec(
 				podtest.SetVolumes(
 					core.Volume{
@@ -16816,10 +17172,28 @@ func TestValidateReplicationControllerUpdate(t *testing.T) {
 		"negative replicas": {
 			old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
 			update: mkValidReplicationController(func(rc *core.ReplicationController) {
-				rc.Spec.Replicas = -1
+				rc.Spec.Replicas = ptr.To[int32](-1)
 			}),
 			expectedErrs: field.ErrorList{
 				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum"),
+			},
+		},
+		"nil replicas": {
+			old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
+			update: mkValidReplicationController(func(rc *core.ReplicationController) {
+				rc.Spec.Replicas = nil
+			}),
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("spec.replicas"), ""),
+			},
+		},
+		"negative minReadySeconds": {
+			old: mkValidReplicationController(func(rc *core.ReplicationController) {}),
+			update: mkValidReplicationController(func(rc *core.ReplicationController) {
+				rc.Spec.MinReadySeconds = -1
+			}),
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum"),
 			},
 		},
 	}
@@ -16839,7 +17213,7 @@ func TestValidateReplicationController(t *testing.T) {
 		mkValidReplicationController(func(rc *core.ReplicationController) {}),
 		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Name = "abc-123" }),
 		mkValidReplicationController(func(rc *core.ReplicationController) {
-			rc.Spec.Replicas = 2
+			rc.Spec.Replicas = ptr.To[int32](2)
 			rc.Spec.Template.Spec = podtest.MakePodSpec(
 				podtest.SetVolumes(
 					core.Volume{
@@ -16860,9 +17234,12 @@ func TestValidateReplicationController(t *testing.T) {
 					}))),
 			)
 		}),
-		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = 0 }),
-		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = 1 }),
-		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = 100 }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = ptr.To[int32](0) }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = ptr.To[int32](1) }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = ptr.To[int32](100) }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.MinReadySeconds = 0 }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.MinReadySeconds = 1 }),
+		mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.MinReadySeconds = 100 }),
 	}
 	for _, tc := range successCases {
 		if errs := ValidateReplicationController(&tc, PodValidationOptions{}); len(errs) != 0 {
@@ -16905,9 +17282,21 @@ func TestValidateReplicationController(t *testing.T) {
 			},
 		},
 		"negative replicas": {
-			input: mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = -1 }),
+			input: mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = ptr.To[int32](-1) }),
 			expectedErrs: field.ErrorList{
 				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum"),
+			},
+		},
+		"negative minReadySeconds": {
+			input: mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.MinReadySeconds = -1 }),
+			expectedErrs: field.ErrorList{
+				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum"),
+			},
+		},
+		"nil replicas": {
+			input: mkValidReplicationController(func(rc *core.ReplicationController) { rc.Spec.Replicas = nil }),
+			expectedErrs: field.ErrorList{
+				field.Required(field.NewPath("spec.replicas"), ""),
 			},
 		},
 		"invalid label": {
@@ -19268,7 +19657,7 @@ func TestValidatePodResourceConsistency(t *testing.T) {
 			},
 		},
 	}, {
-		name: "indivdual container limits greater than pod limits",
+		name: "individual container limits greater than pod limits",
 		podResources: core.ResourceRequirements{
 			Limits: core.ResourceList{
 				core.ResourceCPU:    resource.MustParse("10"),
@@ -19328,6 +19717,8 @@ func TestValidatePodResourceNames(t *testing.T) {
 		{"memory", false},
 		{"cpu", false},
 		{"storage", true},
+		{v1.ResourceHugePagesPrefix + "2Mi", false},
+		{v1.ResourceHugePagesPrefix + "1Gi", false},
 		{"requests.cpu", true},
 		{"requests.memory", true},
 		{"requests.storage", true},
@@ -19372,6 +19763,8 @@ func TestValidateResourceNames(t *testing.T) {
 		{"memory", true, ""},
 		{"cpu", true, ""},
 		{"storage", true, ""},
+		{v1.ResourceHugePagesPrefix + "2Mi", true, ""},
+		{v1.ResourceHugePagesPrefix + "1Gi", true, ""},
 		{"requests.cpu", true, ""},
 		{"requests.memory", true, ""},
 		{"requests.storage", true, ""},
@@ -23960,6 +24353,48 @@ func TestValidateResourceRequirements(t *testing.T) {
 		},
 		validateFn: ValidateContainerResourceRequirements,
 	}, {
+		name: "container resource hugepage with cpu or memory",
+		requirements: core.ResourceRequirements{
+			Limits: core.ResourceList{
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				core.ResourceCPU: resource.MustParse("10"),
+			},
+			Requests: core.ResourceList{
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			},
+		},
+		validateFn: ValidateContainerResourceRequirements,
+	}, {
+		name: "container resource hugepage limit without request",
+		requirements: core.ResourceRequirements{
+			Limits: core.ResourceList{
+				core.ResourceMemory: resource.MustParse("2Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			},
+		},
+		validateFn: ValidateContainerResourceRequirements,
+	}, {
+		name: "pod resource hugepages with cpu or memory",
+		requirements: core.ResourceRequirements{
+			Limits: core.ResourceList{
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			},
+			Requests: core.ResourceList{
+				core.ResourceMemory: resource.MustParse("2Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			},
+		},
+		validateFn: validatePodResourceRequirements,
+	}, {
+		name: "pod resource hugepages limit without request",
+		requirements: core.ResourceRequirements{
+			Limits: core.ResourceList{
+				core.ResourceMemory: resource.MustParse("2Mi"),
+				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			},
+		},
+		validateFn: validatePodResourceRequirements,
+	}, {
 		name: "limits and requests of memory resource are equal",
 		requirements: core.ResourceRequirements{
 			Limits: core.ResourceList{
@@ -24021,62 +24456,81 @@ func TestValidateResourceRequirements(t *testing.T) {
 		validateFn   func(requirements *core.ResourceRequirements,
 			podClaimNames sets.Set[string], fldPath *field.Path,
 			opts PodValidationOptions) field.ErrorList
-	}{{
-		name: "hugepage resource without cpu or memory",
-		requirements: core.ResourceRequirements{
-			Limits: core.ResourceList{
-				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+	}{
+		{
+			name: "container resource hugepage without cpu or memory",
+			requirements: core.ResourceRequirements{
+				Limits: core.ResourceList{
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
+				Requests: core.ResourceList{
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
 			},
-			Requests: core.ResourceList{
-				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+			validateFn: ValidateContainerResourceRequirements,
+		}, {
+			name: "container resource hugepage without limit",
+			requirements: core.ResourceRequirements{
+				Requests: core.ResourceList{
+					core.ResourceMemory: resource.MustParse("2Mi"),
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
 			},
+			validateFn: ValidateContainerResourceRequirements,
+		}, {
+			name: "pod resource hugepages without cpu or memory",
+			requirements: core.ResourceRequirements{
+				Limits: core.ResourceList{
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
+				Requests: core.ResourceList{
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
+			},
+			validateFn: validatePodResourceRequirements,
+		}, {
+			name: "pod resource hugepages request without limit",
+			requirements: core.ResourceRequirements{
+				Requests: core.ResourceList{
+					core.ResourceMemory: resource.MustParse("2Mi"),
+					core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
+				},
+			},
+			validateFn: validatePodResourceRequirements,
+		}, {
+			name: "pod resource with ephemeral-storage",
+			requirements: core.ResourceRequirements{
+				Limits: core.ResourceList{
+					core.ResourceName(core.ResourceEphemeralStorage): resource.MustParse("2Mi"),
+				},
+				Requests: core.ResourceList{
+					core.ResourceName(core.ResourceEphemeralStorage + "2Mi"): resource.MustParse("2Mi"),
+				},
+			},
+			validateFn: validatePodResourceRequirements,
+		}, {
+			name: "pod resource with unsupported prefixed resources",
+			requirements: core.ResourceRequirements{
+				Limits: core.ResourceList{
+					core.ResourceName("kubernetesio/" + core.ResourceCPU): resource.MustParse("2"),
+				},
+				Requests: core.ResourceList{
+					core.ResourceName("kubernetesio/" + core.ResourceMemory): resource.MustParse("2"),
+				},
+			},
+			validateFn: validatePodResourceRequirements,
+		}, {
+			name: "pod resource with unsupported native resources",
+			requirements: core.ResourceRequirements{
+				Limits: core.ResourceList{
+					core.ResourceName("kubernetes.io/" + strings.Repeat("a", 63)): resource.MustParse("2"),
+				},
+				Requests: core.ResourceList{
+					core.ResourceName("kubernetes.io/" + strings.Repeat("a", 63)): resource.MustParse("2"),
+				},
+			},
+			validateFn: validatePodResourceRequirements,
 		},
-		validateFn: ValidateContainerResourceRequirements,
-	}, {
-		name: "pod resource with hugepages",
-		requirements: core.ResourceRequirements{
-			Limits: core.ResourceList{
-				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
-			},
-			Requests: core.ResourceList{
-				core.ResourceName(core.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("2Mi"),
-			},
-		},
-		validateFn: validatePodResourceRequirements,
-	}, {
-		name: "pod resource with ephemeral-storage",
-		requirements: core.ResourceRequirements{
-			Limits: core.ResourceList{
-				core.ResourceName(core.ResourceEphemeralStorage): resource.MustParse("2Mi"),
-			},
-			Requests: core.ResourceList{
-				core.ResourceName(core.ResourceEphemeralStorage + "2Mi"): resource.MustParse("2Mi"),
-			},
-		},
-		validateFn: validatePodResourceRequirements,
-	}, {
-		name: "pod resource with unsupported prefixed resources",
-		requirements: core.ResourceRequirements{
-			Limits: core.ResourceList{
-				core.ResourceName("kubernetesio/" + core.ResourceCPU): resource.MustParse("2"),
-			},
-			Requests: core.ResourceList{
-				core.ResourceName("kubernetesio/" + core.ResourceMemory): resource.MustParse("2"),
-			},
-		},
-		validateFn: validatePodResourceRequirements,
-	}, {
-		name: "pod resource with unsupported native resources",
-		requirements: core.ResourceRequirements{
-			Limits: core.ResourceList{
-				core.ResourceName("kubernetes.io/" + strings.Repeat("a", 63)): resource.MustParse("2"),
-			},
-			Requests: core.ResourceList{
-				core.ResourceName("kubernetes.io/" + strings.Repeat("a", 63)): resource.MustParse("2"),
-			},
-		},
-		validateFn: validatePodResourceRequirements,
-	},
 		{
 			name: "pod resource with unsupported empty native resource name",
 			requirements: core.ResourceRequirements{
@@ -25484,221 +25938,6 @@ func TestValidatePodDNSConfigWithRelaxedSearchDomain(t *testing.T) {
 	}
 }
 
-// TODO: merge these test to TestValidatePodSpec after SupplementalGroupsPolicy feature graduates to Beta
-func TestValidatePodSpecWithSupplementalGroupsPolicy(t *testing.T) {
-	fldPath := field.NewPath("spec")
-	badSupplementalGroupsPolicyEmpty := ptr.To(core.SupplementalGroupsPolicy(""))
-	badSupplementalGroupsPolicyNotSupported := ptr.To(core.SupplementalGroupsPolicy("not-supported"))
-
-	validatePodSpecTestCases := map[string]struct {
-		securityContext *core.PodSecurityContext
-		wantFieldErrors field.ErrorList
-	}{
-		"nil SecurityContext is valid": {
-			securityContext: nil,
-		},
-		"nil SupplementalGroupsPolicy is valid": {
-			securityContext: &core.PodSecurityContext{},
-		},
-		"SupplementalGroupsPolicyMerge is valid": {
-			securityContext: &core.PodSecurityContext{
-				SupplementalGroupsPolicy: ptr.To(core.SupplementalGroupsPolicyMerge),
-			},
-		},
-		"SupplementalGroupsPolicyStrict is valid": {
-			securityContext: &core.PodSecurityContext{
-				SupplementalGroupsPolicy: ptr.To(core.SupplementalGroupsPolicyStrict),
-			},
-		},
-		"empty SupplementalGroupsPolicy is invalid": {
-			securityContext: &core.PodSecurityContext{
-				SupplementalGroupsPolicy: badSupplementalGroupsPolicyEmpty,
-			},
-			wantFieldErrors: field.ErrorList{
-				field.NotSupported(
-					fldPath.Child("securityContext").Child("supplementalGroupsPolicy"),
-					badSupplementalGroupsPolicyEmpty, sets.List(validSupplementalGroupsPolicies)),
-			},
-		},
-		"not-supported SupplementalGroupsPolicy is invalid": {
-			securityContext: &core.PodSecurityContext{
-				SupplementalGroupsPolicy: badSupplementalGroupsPolicyNotSupported,
-			},
-			wantFieldErrors: field.ErrorList{
-				field.NotSupported(
-					fldPath.Child("securityContext").Child("supplementalGroupsPolicy"),
-					badSupplementalGroupsPolicyNotSupported, sets.List(validSupplementalGroupsPolicies)),
-			},
-		},
-	}
-	for name, tt := range validatePodSpecTestCases {
-		t.Run(name, func(t *testing.T) {
-			podSpec := podtest.MakePodSpec(podtest.SetSecurityContext(tt.securityContext), podtest.SetContainers(podtest.MakeContainer("con")))
-
-			if tt.wantFieldErrors == nil {
-				tt.wantFieldErrors = field.ErrorList{}
-			}
-			errs := ValidatePodSpec(&podSpec, nil, fldPath, PodValidationOptions{})
-			if diff := cmp.Diff(tt.wantFieldErrors, errs); diff != "" {
-				t.Errorf("unexpected field errors (-want, +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-// TODO: merge these testcases to TestValidateWindowsPodSecurityContext after SupplementalGroupsPolicy feature graduates to Beta
-func TestValidateWindowsPodSecurityContextSupplementalGroupsPolicy(t *testing.T) {
-	fldPath := field.NewPath("spec")
-
-	testCases := map[string]struct {
-		securityContext *core.PodSecurityContext
-		wantFieldErrors field.ErrorList
-	}{
-		"nil SecurityContext is valid": {
-			securityContext: nil,
-		},
-		"nil SupplementalGroupdPolicy is valid": {
-			securityContext: &core.PodSecurityContext{},
-		},
-		"non-empty SupplementalGroupdPolicy is invalid": {
-			securityContext: &core.PodSecurityContext{
-				SupplementalGroupsPolicy: ptr.To(core.SupplementalGroupsPolicyMerge),
-			},
-			wantFieldErrors: field.ErrorList{
-				field.Forbidden(
-					fldPath.Child("securityContext").Child("supplementalGroupsPolicy"),
-					"cannot be set for a windows pod"),
-			},
-		},
-	}
-
-	for name, tt := range testCases {
-		t.Run(name, func(t *testing.T) {
-			podSpec := podtest.MakePodSpec(podtest.SetSecurityContext(tt.securityContext), podtest.SetOS(core.Windows), podtest.SetContainers(podtest.MakeContainer("con")))
-			if tt.wantFieldErrors == nil {
-				tt.wantFieldErrors = field.ErrorList{}
-			}
-			errs := validateWindows(&podSpec, fldPath)
-			if diff := cmp.Diff(tt.wantFieldErrors, errs); diff != "" {
-				t.Errorf("unexpected field errors (-want, +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-// TODO: merge these testcases to TestValidatePodStatusUpdate after SupplementalGroupsPolicy feature graduates to Beta
-func TestValidatePodStatusUpdateWithSupplementalGroupsPolicy(t *testing.T) {
-	badUID := int64(-1)
-	badGID := int64(-1)
-
-	containerTypes := map[string]func(podStatus *core.PodStatus, containerStatus []core.ContainerStatus){
-		"container": func(podStatus *core.PodStatus, containerStatus []core.ContainerStatus) {
-			podStatus.ContainerStatuses = containerStatus
-		},
-		"initContainer": func(podStatus *core.PodStatus, containerStatus []core.ContainerStatus) {
-			podStatus.InitContainerStatuses = containerStatus
-		},
-		"ephemeralContainer": func(podStatus *core.PodStatus, containerStatus []core.ContainerStatus) {
-			podStatus.EphemeralContainerStatuses = containerStatus
-		},
-	}
-
-	testCases := map[string]struct {
-		podOSes           []*core.PodOS
-		containerStatuses []core.ContainerStatus
-		wantFieldErrors   field.ErrorList
-	}{
-		"nil container user is valid": {
-			podOSes:           []*core.PodOS{nil, {Name: core.Linux}},
-			containerStatuses: []core.ContainerStatus{},
-		},
-		"empty container user is valid": {
-			podOSes: []*core.PodOS{nil, {Name: core.Linux}},
-			containerStatuses: []core.ContainerStatus{{
-				User: &core.ContainerUser{},
-			}},
-		},
-		"container user with valid ids": {
-			podOSes: []*core.PodOS{nil, {Name: core.Linux}},
-			containerStatuses: []core.ContainerStatus{{
-				User: &core.ContainerUser{
-					Linux: &core.LinuxContainerUser{},
-				},
-			}},
-		},
-		"container user with invalid ids": {
-			podOSes: []*core.PodOS{nil, {Name: core.Linux}},
-			containerStatuses: []core.ContainerStatus{{
-				User: &core.ContainerUser{
-					Linux: &core.LinuxContainerUser{
-						UID:                badUID,
-						GID:                badGID,
-						SupplementalGroups: []int64{badGID},
-					},
-				},
-			}},
-			wantFieldErrors: field.ErrorList{
-				field.Invalid(field.NewPath("[0].linux.uid"), badUID, "must be between 0 and 2147483647, inclusive"),
-				field.Invalid(field.NewPath("[0].linux.gid"), badGID, "must be between 0 and 2147483647, inclusive"),
-				field.Invalid(field.NewPath("[0].linux.supplementalGroups[0]"), badGID, "must be between 0 and 2147483647, inclusive"),
-			},
-		},
-		"user.linux must not be set in windows": {
-			podOSes: []*core.PodOS{{Name: core.Windows}},
-			containerStatuses: []core.ContainerStatus{{
-				User: &core.ContainerUser{
-					Linux: &core.LinuxContainerUser{},
-				},
-			}},
-			wantFieldErrors: field.ErrorList{
-				field.Forbidden(field.NewPath("[0].linux"), "cannot be set for a windows pod"),
-			},
-		},
-	}
-
-	for name, tt := range testCases {
-		for _, podOS := range tt.podOSes {
-			for containerType, setContainerStatuses := range containerTypes {
-				t.Run(fmt.Sprintf("[podOS=%v][containerType=%s] %s", podOS, containerType, name), func(t *testing.T) {
-					oldPod := &core.Pod{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:            "foo",
-							ResourceVersion: "1",
-						},
-						Spec: core.PodSpec{
-							OS: podOS,
-						},
-						Status: core.PodStatus{},
-					}
-					newPod := &core.Pod{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:            "foo",
-							ResourceVersion: "1",
-						},
-						Spec: core.PodSpec{
-							OS: podOS,
-						},
-					}
-					setContainerStatuses(&newPod.Status, tt.containerStatuses)
-					var expectedFieldErrors field.ErrorList
-					for _, err := range tt.wantFieldErrors {
-						expectedField := fmt.Sprintf("%s%s", field.NewPath("status").Child(containerType+"Statuses"), err.Field)
-						expectedFieldErrors = append(expectedFieldErrors, &field.Error{
-							Type:     err.Type,
-							Field:    expectedField,
-							BadValue: err.BadValue,
-							Detail:   err.Detail,
-						})
-					}
-					errs := ValidatePodStatusUpdate(newPod, oldPod, PodValidationOptions{})
-					if diff := cmp.Diff(expectedFieldErrors, errs); diff != "" {
-						t.Errorf("unexpected field errors (-want, +got):\n%s", diff)
-					}
-				})
-			}
-		}
-	}
-}
 func TestValidateContainerStatusNoAllocatedResourcesStatus(t *testing.T) {
 	containerStatuses := []core.ContainerStatus{
 		{
@@ -26710,6 +26949,122 @@ func TestValidatePodResize(t *testing.T) {
 					t.Errorf("unexpected valid:\nA: %+v\nB: %+v", test.new, test.old)
 				} else if actualErr := errs.ToAggregate().Error(); !strings.Contains(actualErr, test.err) {
 					t.Errorf("unexpected error message:\nExpected error: %s\nActual error: %s", test.err, actualErr)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateNodeSwapStatus(t *testing.T) {
+	makeNode := func(nodeSwapStatus *core.NodeSwapStatus) core.Node {
+		node := makeNode("test-node", nil)
+		node.Status.NodeInfo.Swap = nodeSwapStatus
+
+		return node
+	}
+	makeSwapStatus := func(capacity int64) *core.NodeSwapStatus {
+		return &core.NodeSwapStatus{
+			Capacity: ptr.To(capacity),
+		}
+	}
+
+	testCases := []struct {
+		name        string
+		expectError bool
+		node        core.Node
+	}{
+		{
+			name:        "node with nil nodeSwapStatus",
+			expectError: false,
+			node:        makeNode(nil),
+		},
+		{
+			name:        "node with nil nodeSwapStatus.Capacity",
+			expectError: false,
+			node:        makeNode(&core.NodeSwapStatus{}),
+		},
+		{
+			name:        "node with positive capacity",
+			expectError: false,
+			node:        makeNode(makeSwapStatus(123456)),
+		},
+		{
+			name:        "node with zero capacity should be invalid (nodeSwapStatus should be nil)",
+			expectError: true,
+			node:        makeNode(makeSwapStatus(0)),
+		},
+		{
+			name:        "node with negative capacity should be invalid",
+			expectError: true,
+			node:        makeNode(makeSwapStatus(-123456)),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := ValidateNode(&tc.node)
+
+			if len(errs) == 0 && tc.expectError {
+				t.Errorf("expected failure for %s, but there were none", tc.name)
+				return
+			}
+			if len(errs) != 0 && !tc.expectError {
+				t.Errorf("expected success for %s, but there were errors: %v", tc.name, errs)
+				return
+			}
+		})
+	}
+}
+
+func TestValidateStopSignal(t *testing.T) {
+	fldPath := field.NewPath("root")
+	sigkill := core.SIGKILL
+	sigterm := core.SIGTERM
+	sighup := core.SIGHUP
+	linux := core.PodOS{Name: core.Linux}
+	windows := core.PodOS{Name: core.Windows}
+
+	testCases := []struct {
+		name       string
+		stopsignal *core.Signal
+		os         *core.PodOS
+		expectErr  field.ErrorList
+	}{
+		{
+			name:       "Empty spec.os.name",
+			stopsignal: &sigterm,
+			os:         nil,
+			expectErr:  field.ErrorList{field.Forbidden(fldPath, "may not be set for containers with empty `spec.os.name`")},
+		},
+		{
+			name:       "Invalid signal passed to windows pod",
+			stopsignal: &sighup,
+			os:         &windows,
+			expectErr:  field.ErrorList{field.NotSupported(fldPath, &sighup, sets.List(supportedStopSignalsWindows))},
+		},
+		{
+			name:       "Valid signal passed to windows pod",
+			stopsignal: &sigkill,
+			os:         &windows,
+		},
+		{
+			name:       "Valid signal passed to linux pod",
+			stopsignal: &sighup,
+			os:         &linux,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateStopSignal(tc.stopsignal, fldPath, tc.os)
+
+			if len(tc.expectErr) > 0 && len(errs) == 0 {
+				t.Errorf("Unexpected success")
+			} else if len(tc.expectErr) == 0 && len(errs) != 0 {
+				t.Errorf("Unexpected error(s): %v", errs)
+			} else if len(tc.expectErr) > 0 {
+				if tc.expectErr[0].Error() != errs[0].Error() {
+					t.Errorf("Unexpected error(s): %v", errs)
 				}
 			}
 		})

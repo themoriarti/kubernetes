@@ -131,6 +131,12 @@ func (kl *Kubelet) getKubeletMappings() (uint32, uint32, error) {
 		return defaultFirstID, defaultLen, nil
 	}
 
+	// We NEED to check for the user because getsubids can be configured to gather the response
+	// with a remote call and we can't distinguish between the remote endpoint not being reachable
+	// and the remote endpoint is reachable but no entry is present for the user.
+	// So we check for the kubelet user first, if it exist and getsubids is present, we expect
+	// to get _some_ configuration. If the user exist and getsubids doesn't give us any
+	// configuration, then we consider the remote down and fail to start the kubelet.
 	_, err := user.Lookup(kubeletUser)
 	if err != nil {
 		var unknownUserErr user.UnknownUserError
@@ -1107,7 +1113,7 @@ func (kl *Kubelet) removeOrphanedPodStatuses(pods []*v1.Pod, mirrorPods []*v1.Po
 	for _, pod := range mirrorPods {
 		podUIDs[pod.UID] = true
 	}
-	kl.statusManager.RemoveOrphanedStatuses(podUIDs)
+	kl.statusManager.RemoveOrphanedStatuses(klog.TODO(), podUIDs)
 }
 
 // HandlePodCleanups performs a series of cleanup work, including terminating
@@ -1383,7 +1389,7 @@ func (kl *Kubelet) HandlePodCleanups(ctx context.Context) error {
 	}
 
 	// Cleanup any backoff entries.
-	kl.backOff.GC()
+	kl.crashLoopBackOff.GC()
 	return nil
 }
 
@@ -1570,7 +1576,7 @@ func (kl *Kubelet) GetKubeletContainerLogs(ctx context.Context, podFullName, con
 }
 
 // getPhase returns the phase of a pod given its container info.
-func getPhase(pod *v1.Pod, info []v1.ContainerStatus, podIsTerminal bool) v1.PodPhase {
+func getPhase(pod *v1.Pod, info []v1.ContainerStatus, podIsTerminal, podHasInitialized bool) v1.PodPhase {
 	spec := pod.Spec
 	pendingRestartableInitContainers := 0
 	pendingRegularInitContainers := 0
@@ -1689,7 +1695,7 @@ func getPhase(pod *v1.Pod, info []v1.ContainerStatus, podIsTerminal bool) v1.Pod
 			// This is needed to handle the case where the pod has been initialized but
 			// the restartable init containers are restarting and the pod should not be
 			// placed back into v1.PodPending since the regular containers have run.
-			!kubecontainer.HasAnyRegularContainerStarted(&spec, info)):
+			!podHasInitialized):
 		fallthrough
 	case waiting > 0:
 		klog.V(5).InfoS("Pod waiting > 0, pending")
@@ -1738,14 +1744,15 @@ func getPhase(pod *v1.Pod, info []v1.ContainerStatus, podIsTerminal bool) v1.Pod
 	}
 }
 
-func (kl *Kubelet) determinePodResizeStatus(allocatedPod *v1.Pod, podStatus *kubecontainer.PodStatus, podIsTerminal bool) v1.PodResizeStatus {
+func (kl *Kubelet) determinePodResizeStatus(allocatedPod *v1.Pod, podIsTerminal bool) []*v1.PodCondition {
 	// If pod is terminal, clear the resize status.
 	if podIsTerminal {
-		kl.statusManager.SetPodResizeStatus(allocatedPod.UID, "")
-		return ""
+		kl.statusManager.ClearPodResizeInProgressCondition(allocatedPod.UID)
+		kl.statusManager.ClearPodResizePendingCondition(allocatedPod.UID)
+		return nil
 	}
 
-	resizeStatus := kl.statusManager.GetPodResizeStatus(allocatedPod.UID)
+	resizeStatus := kl.statusManager.GetPodResizeConditions(allocatedPod.UID)
 	return resizeStatus
 }
 
@@ -1759,12 +1766,9 @@ func (kl *Kubelet) generateAPIPodStatus(pod *v1.Pod, podStatus *kubecontainer.Po
 		oldPodStatus = pod.Status
 	}
 	s := kl.convertStatusToAPIStatus(pod, podStatus, oldPodStatus)
-	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		s.Resize = kl.determinePodResizeStatus(pod, podStatus, podIsTerminal)
-	}
 	// calculate the next phase and preserve reason
 	allStatus := append(append([]v1.ContainerStatus{}, s.ContainerStatuses...), s.InitContainerStatuses...)
-	s.Phase = getPhase(pod, allStatus, podIsTerminal)
+	s.Phase = getPhase(pod, allStatus, podIsTerminal, kubecontainer.HasAnyActiveRegularContainerStarted(&pod.Spec, podStatus))
 	klog.V(4).InfoS("Got phase for pod", "pod", klog.KObj(pod), "oldPhase", oldPodStatus.Phase, "phase", s.Phase)
 
 	// Perform a three-way merge between the statuses from the status manager,
@@ -1827,6 +1831,13 @@ func (kl *Kubelet) generateAPIPodStatus(pod *v1.Pod, podStatus *kubecontainer.Po
 			s.Conditions = append(s.Conditions, c)
 		}
 	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
+		resizeStatus := kl.determinePodResizeStatus(pod, podIsTerminal)
+		for _, c := range resizeStatus {
+			c.ObservedGeneration = podutil.GetPodObservedGenerationIfEnabledOnCondition(&oldPodStatus, pod.Generation, c.Type)
+			s.Conditions = append(s.Conditions, *c)
+		}
+	}
 
 	// copy over the pod disruption conditions from state which is already
 	// updated during the eviciton (due to either node resource pressure or
@@ -1839,15 +1850,16 @@ func (kl *Kubelet) generateAPIPodStatus(pod *v1.Pod, podStatus *kubecontainer.Po
 
 	// set all Kubelet-owned conditions
 	if utilfeature.DefaultFeatureGate.Enabled(features.PodReadyToStartContainersCondition) {
-		s.Conditions = append(s.Conditions, status.GeneratePodReadyToStartContainersCondition(pod, podStatus))
+		s.Conditions = append(s.Conditions, status.GeneratePodReadyToStartContainersCondition(pod, &oldPodStatus, podStatus))
 	}
 	allContainerStatuses := append(s.InitContainerStatuses, s.ContainerStatuses...)
-	s.Conditions = append(s.Conditions, status.GeneratePodInitializedCondition(&pod.Spec, allContainerStatuses, s.Phase))
-	s.Conditions = append(s.Conditions, status.GeneratePodReadyCondition(&pod.Spec, s.Conditions, allContainerStatuses, s.Phase))
-	s.Conditions = append(s.Conditions, status.GenerateContainersReadyCondition(&pod.Spec, allContainerStatuses, s.Phase))
+	s.Conditions = append(s.Conditions, status.GeneratePodInitializedCondition(pod, &oldPodStatus, allContainerStatuses, s.Phase))
+	s.Conditions = append(s.Conditions, status.GeneratePodReadyCondition(pod, &oldPodStatus, s.Conditions, allContainerStatuses, s.Phase))
+	s.Conditions = append(s.Conditions, status.GenerateContainersReadyCondition(pod, &oldPodStatus, allContainerStatuses, s.Phase))
 	s.Conditions = append(s.Conditions, v1.PodCondition{
-		Type:   v1.PodScheduled,
-		Status: v1.ConditionTrue,
+		Type:               v1.PodScheduled,
+		ObservedGeneration: podutil.GetPodObservedGenerationIfEnabledOnCondition(&oldPodStatus, pod.Generation, v1.PodScheduled),
+		Status:             v1.ConditionTrue,
 	})
 	// set HostIP/HostIPs and initialize PodIP/PodIPs for host network pods
 	if kl.kubeClient != nil {
@@ -2099,6 +2111,13 @@ func (kl *Kubelet) convertToAPIContainerStatuses(pod *v1.Pod, podStatus *kubecon
 			} else {
 				preserveOldResourcesValue(v1.ResourceCPU, oldStatus.Resources.Requests, resources.Requests)
 			}
+			// TODO(tallclair,vinaykul,InPlacePodVerticalScaling): Investigate defaulting to actuated resources instead of allocated resources above
+			if _, exists := resources.Requests[v1.ResourceMemory]; exists {
+				// Get memory requests from actuated resources
+				if actuatedResources, found := kl.allocationManager.GetActuatedResources(pod.UID, allocatedContainer.Name); found {
+					resources.Requests[v1.ResourceMemory] = *actuatedResources.Requests.Memory()
+				}
+			}
 		}
 
 		return resources
@@ -2273,14 +2292,15 @@ func (kl *Kubelet) convertToAPIContainerStatuses(pod *v1.Pod, podStatus *kubecon
 			allocatedContainer := kubecontainer.GetContainerSpec(pod, cName)
 			if allocatedContainer != nil {
 				status.Resources = convertContainerStatusResources(allocatedContainer, status, cStatus, oldStatuses)
-				if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScalingAllocatedStatus) {
-					status.AllocatedResources = allocatedContainer.Resources.Requests
-				}
+				status.AllocatedResources = allocatedContainer.Resources.Requests
 			}
 		}
 
 		if utilfeature.DefaultFeatureGate.Enabled(features.SupplementalGroupsPolicy) {
 			status.User = convertContainerStatusUser(cStatus)
+		}
+		if utilfeature.DefaultFeatureGate.Enabled(features.ContainerStopSignals) {
+			status.StopSignal = cStatus.StopSignal
 		}
 		if containerSeen[cName] == 0 {
 			statuses[cName] = status

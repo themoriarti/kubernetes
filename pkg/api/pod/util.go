@@ -678,6 +678,51 @@ func dropDisabledFields(
 	dropPodLifecycleSleepAction(podSpec, oldPodSpec)
 	dropImageVolumes(podSpec, oldPodSpec)
 	dropSELinuxChangePolicy(podSpec, oldPodSpec)
+	dropContainerStopSignals(podSpec, oldPodSpec)
+}
+
+func dropContainerStopSignals(podSpec, oldPodSpec *api.PodSpec) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.ContainerStopSignals) || containerStopSignalsInUse(oldPodSpec) {
+		return
+	}
+
+	wipeLifecycle := func(ctr *api.Container) {
+		if ctr.Lifecycle == nil {
+			return
+		}
+		if ctr.Lifecycle.StopSignal != nil {
+			ctr.Lifecycle.StopSignal = nil
+			if *ctr.Lifecycle == (api.Lifecycle{}) {
+				ctr.Lifecycle = nil
+			}
+		}
+	}
+
+	VisitContainers(podSpec, AllContainers, func(c *api.Container, containerType ContainerType) bool {
+		if c.Lifecycle == nil {
+			return true
+		}
+		wipeLifecycle(c)
+		return true
+	})
+}
+
+func containerStopSignalsInUse(podSpec *api.PodSpec) bool {
+	if podSpec == nil {
+		return false
+	}
+	var inUse bool
+	VisitContainers(podSpec, AllContainers, func(c *api.Container, containerType ContainerType) bool {
+		if c.Lifecycle == nil {
+			return true
+		}
+		if c.Lifecycle.StopSignal != nil {
+			inUse = true
+			return false
+		}
+		return true
+	})
+	return inUse
 }
 
 func dropDisabledPodLevelResources(podSpec, oldPodSpec *api.PodSpec) {
@@ -713,7 +758,7 @@ func dropPodLifecycleSleepAction(podSpec, oldPodSpec *api.PodSpec) {
 			continue
 		}
 		adjustLifecycle(podSpec.Containers[i].Lifecycle)
-		if podSpec.Containers[i].Lifecycle.PreStop == nil && podSpec.Containers[i].Lifecycle.PostStart == nil {
+		if podSpec.Containers[i].Lifecycle.PreStop == nil && podSpec.Containers[i].Lifecycle.PostStart == nil && podSpec.Containers[i].Lifecycle.StopSignal == nil {
 			podSpec.Containers[i].Lifecycle = nil
 		}
 	}
@@ -723,7 +768,7 @@ func dropPodLifecycleSleepAction(podSpec, oldPodSpec *api.PodSpec) {
 			continue
 		}
 		adjustLifecycle(podSpec.InitContainers[i].Lifecycle)
-		if podSpec.InitContainers[i].Lifecycle.PreStop == nil && podSpec.InitContainers[i].Lifecycle.PostStart == nil {
+		if podSpec.InitContainers[i].Lifecycle.PreStop == nil && podSpec.InitContainers[i].Lifecycle.PostStart == nil && podSpec.InitContainers[i].Lifecycle.StopSignal == nil {
 			podSpec.InitContainers[i].Lifecycle = nil
 		}
 	}
@@ -733,7 +778,7 @@ func dropPodLifecycleSleepAction(podSpec, oldPodSpec *api.PodSpec) {
 			continue
 		}
 		adjustLifecycle(podSpec.EphemeralContainers[i].Lifecycle)
-		if podSpec.EphemeralContainers[i].Lifecycle.PreStop == nil && podSpec.EphemeralContainers[i].Lifecycle.PostStart == nil {
+		if podSpec.EphemeralContainers[i].Lifecycle.PreStop == nil && podSpec.EphemeralContainers[i].Lifecycle.PostStart == nil && podSpec.EphemeralContainers[i].Lifecycle.StopSignal == nil {
 			podSpec.EphemeralContainers[i].Lifecycle = nil
 		}
 	}
@@ -791,7 +836,7 @@ func dropDisabledPodStatusFields(podStatus, oldPodStatus *api.PodStatus, podSpec
 	}
 
 	if !utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) && !inPlacePodVerticalScalingInUse(oldPodSpec) {
-		// Drop Resize and Resources fields
+		// Drop Resources fields
 		dropResourcesField := func(csl []api.ContainerStatus) {
 			for i := range csl {
 				csl[i].Resources = nil
@@ -800,10 +845,7 @@ func dropDisabledPodStatusFields(podStatus, oldPodStatus *api.PodStatus, podSpec
 		dropResourcesField(podStatus.ContainerStatuses)
 		dropResourcesField(podStatus.InitContainerStatuses)
 		dropResourcesField(podStatus.EphemeralContainerStatuses)
-		podStatus.Resize = ""
-	}
-	if !utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) ||
-		!utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScalingAllocatedStatus) {
+
 		// Drop AllocatedResources field
 		dropAllocatedResourcesField := func(csl []api.ContainerStatus) {
 			for i := range csl {

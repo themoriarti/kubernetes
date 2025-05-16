@@ -36,8 +36,8 @@ import (
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/apiserver/pkg/storage/cacher/delegator"
 	"k8s.io/apiserver/pkg/storage/cacher/metrics"
-	etcdfeature "k8s.io/apiserver/pkg/storage/feature"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/component-base/tracing"
 	"k8s.io/klog/v2"
@@ -49,12 +49,12 @@ var (
 	// List latency SLO (30 seconds) and timeout (1 minute).
 	ConsistencyCheckPeriod = 5 * time.Minute
 	// ConsistencyCheckerEnabled enables the consistency checking mechanism for cache.
-	// Based on KUBE_WATCHCACHE_CONSISTANCY_CHECKER environment variable.
+	// Based on KUBE_WATCHCACHE_CONSISTENCY_CHECKER environment variable.
 	ConsistencyCheckerEnabled = false
 )
 
 func init() {
-	ConsistencyCheckerEnabled, _ = strconv.ParseBool(os.Getenv("KUBE_WATCHCACHE_CONSISTANCY_CHECKER"))
+	ConsistencyCheckerEnabled, _ = strconv.ParseBool(os.Getenv("KUBE_WATCHCACHE_CONSISTENCY_CHECKER"))
 }
 
 func NewCacheDelegator(cacher *Cacher, storage storage.Interface) *CacheDelegator {
@@ -176,7 +176,15 @@ func (c *CacheDelegator) Get(ctx context.Context, key string, opts storage.GetOp
 }
 
 func (c *CacheDelegator) GetList(ctx context.Context, key string, opts storage.ListOptions, listObj runtime.Object) error {
-	if shouldDelegateList(opts) {
+	_, _, err := storage.ValidateListOptions(c.cacher.resourcePrefix, c.cacher.versioner, opts)
+	if err != nil {
+		return err
+	}
+	result, err := delegator.ShouldDelegateList(opts, c.cacher)
+	if err != nil {
+		return err
+	}
+	if result.ShouldDelegate {
 		return c.storage.GetList(ctx, key, opts, listObj)
 	}
 
@@ -198,9 +206,7 @@ func (c *CacheDelegator) GetList(ctx context.Context, key string, opts storage.L
 			return c.storage.GetList(ctx, key, opts, listObj)
 		}
 	}
-	requestWatchProgressSupported := etcdfeature.DefaultFeatureSupportChecker.Supports(storage.RequestWatchProgress)
-	consistentRead := opts.ResourceVersion == "" && utilfeature.DefaultFeatureGate.Enabled(features.ConsistentListFromCache) && requestWatchProgressSupported
-	if consistentRead {
+	if result.ConsistentRead {
 		listRV, err = c.storage.GetCurrentResourceVersion(ctx)
 		if err != nil {
 			return err
@@ -212,7 +218,10 @@ func (c *CacheDelegator) GetList(ctx context.Context, key string, opts storage.L
 	success := "true"
 	fallback := "false"
 	if err != nil {
-		if consistentRead {
+		if errors.IsResourceExpired(err) {
+			return c.storage.GetList(ctx, key, opts, listObj)
+		}
+		if result.ConsistentRead {
 			if storage.IsTooLargeResourceVersion(err) {
 				fallback = "true"
 				// Reset resourceVersion during fallback from consistent read.
@@ -226,7 +235,7 @@ func (c *CacheDelegator) GetList(ctx context.Context, key string, opts storage.L
 		}
 		return err
 	}
-	if consistentRead {
+	if result.ConsistentRead {
 		metrics.ConsistentReadTotal.WithLabelValues(c.cacher.resourcePrefix, success, fallback).Add(1)
 	}
 	return nil
@@ -238,37 +247,6 @@ func shouldDelegateListOnNotReadyCache(opts storage.ListOptions) bool {
 	noFieldSelector := pred.Field == nil || pred.Field.Empty()
 	hasLimit := pred.Limit > 0
 	return noLabelSelector && noFieldSelector && hasLimit
-}
-
-// NOTICE: Keep in sync with shouldListFromStorage function in
-//
-//	staging/src/k8s.io/apiserver/pkg/util/flowcontrol/request/list_work_estimator.go
-func shouldDelegateList(opts storage.ListOptions) bool {
-	// see https://kubernetes.io/docs/reference/using-api/api-concepts/#semantics-for-get-and-list
-	switch opts.ResourceVersionMatch {
-	case metav1.ResourceVersionMatchExact:
-		return true
-	case metav1.ResourceVersionMatchNotOlderThan:
-		return false
-	case "":
-		// Legacy exact match
-		if opts.Predicate.Limit > 0 && len(opts.ResourceVersion) > 0 && opts.ResourceVersion != "0" {
-			return true
-		}
-		// Continue
-		if len(opts.Predicate.Continue) > 0 {
-			return true
-		}
-		// Consistent Read
-		if opts.ResourceVersion == "" {
-			consistentListFromCacheEnabled := utilfeature.DefaultFeatureGate.Enabled(features.ConsistentListFromCache)
-			requestWatchProgressSupported := etcdfeature.DefaultFeatureSupportChecker.Supports(storage.RequestWatchProgress)
-			return !consistentListFromCacheEnabled || !requestWatchProgressSupported
-		}
-		return false
-	default:
-		return true
-	}
 }
 
 func (c *CacheDelegator) GuaranteedUpdate(ctx context.Context, key string, destination runtime.Object, ignoreNotFound bool, preconditions *storage.Preconditions, tryUpdate storage.UpdateFunc, cachedExistingObject runtime.Object) error {
@@ -347,16 +325,18 @@ func (c consistencyChecker) startChecking(stopCh <-chan struct{}) {
 func (c *consistencyChecker) check(ctx context.Context) {
 	digests, err := c.calculateDigests(ctx)
 	if err != nil {
-		klog.ErrorS(err, "Cache consistentency check error", "resource", c.resourcePrefix)
+		klog.ErrorS(err, "Cache consistency check error", "resource", c.resourcePrefix)
 		metrics.StorageConsistencyCheckTotal.WithLabelValues(c.resourcePrefix, "error").Inc()
 		return
 	}
 	if digests.CacheDigest == digests.EtcdDigest {
-		klog.V(3).InfoS("Cache consistentency check passed", "resource", c.resourcePrefix, "resourceVersion", digests.ResourceVersion, "digest", digests.CacheDigest)
+		klog.V(3).InfoS("Cache consistency check passed", "resource", c.resourcePrefix, "resourceVersion", digests.ResourceVersion, "digest", digests.CacheDigest)
 		metrics.StorageConsistencyCheckTotal.WithLabelValues(c.resourcePrefix, "success").Inc()
 	} else {
-		klog.ErrorS(nil, "Cache consistentency check failed", "resource", c.resourcePrefix, "resourceVersion", digests.ResourceVersion, "etcdDigest", digests.EtcdDigest, "cacheDigest", digests.CacheDigest)
+		klog.ErrorS(nil, "Cache consistency check failed", "resource", c.resourcePrefix, "resourceVersion", digests.ResourceVersion, "etcdDigest", digests.EtcdDigest, "cacheDigest", digests.CacheDigest)
 		metrics.StorageConsistencyCheckTotal.WithLabelValues(c.resourcePrefix, "failure").Inc()
+		// Panic on internal consistency checking enabled only by environment variable. R
+		panic(fmt.Sprintf("Cache consistency check failed, resource: %q, resourceVersion: %q, etcdDigest: %q, cacheDigest: %q", c.resourcePrefix, digests.ResourceVersion, digests.EtcdDigest, digests.CacheDigest))
 	}
 }
 
@@ -365,6 +345,7 @@ func (c *consistencyChecker) calculateDigests(ctx context.Context) (*storageDige
 		return nil, fmt.Errorf("cache is not ready")
 	}
 	cacheDigest, resourceVersion, err := c.calculateStoreDigest(ctx, c.cacher, storage.ListOptions{
+		Recursive:            true,
 		ResourceVersion:      "0",
 		Predicate:            storage.Everything,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
@@ -373,6 +354,7 @@ func (c *consistencyChecker) calculateDigests(ctx context.Context) (*storageDige
 		return nil, fmt.Errorf("failed calculating cache digest: %w", err)
 	}
 	etcdDigest, _, err := c.calculateStoreDigest(ctx, c.etcd, storage.ListOptions{
+		Recursive:            true,
 		ResourceVersion:      resourceVersion,
 		Predicate:            storage.Everything,
 		ResourceVersionMatch: metav1.ResourceVersionMatchExact,

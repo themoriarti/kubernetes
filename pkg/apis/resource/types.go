@@ -106,19 +106,19 @@ type ResourceSliceSpec struct {
 	// new nodes of the same type as some old node might also make new
 	// resources available.
 	//
-	// Exactly one of NodeName, NodeSelector and AllNodes must be set.
+	// Exactly one of NodeName, NodeSelector, AllNodes, and PerDeviceNodeSelection must be set.
 	// This field is immutable.
 	//
 	// +optional
 	// +oneOf=NodeSelection
-	NodeName string
+	NodeName *string
 
 	// NodeSelector defines which nodes have access to the resources in the pool,
 	// when that pool is not limited to a single node.
 	//
 	// Must use exactly one term.
 	//
-	// Exactly one of NodeName, NodeSelector and AllNodes must be set.
+	// Exactly one of NodeName, NodeSelector, AllNodes, and PerDeviceNodeSelection must be set.
 	//
 	// +optional
 	// +oneOf=NodeSelection
@@ -126,11 +126,11 @@ type ResourceSliceSpec struct {
 
 	// AllNodes indicates that all nodes have access to the resources in the pool.
 	//
-	// Exactly one of NodeName, NodeSelector and AllNodes must be set.
+	// Exactly one of NodeName, NodeSelector, AllNodes, and PerDeviceNodeSelection must be set.
 	//
 	// +optional
 	// +oneOf=NodeSelection
-	AllNodes bool
+	AllNodes *bool
 
 	// Devices lists some or all of the devices in this pool.
 	//
@@ -139,6 +139,54 @@ type ResourceSliceSpec struct {
 	// +optional
 	// +listType=atomic
 	Devices []Device
+
+	// PerDeviceNodeSelection defines whether the access from nodes to
+	// resources in the pool is set on the ResourceSlice level or on each
+	// device. If it is set to true, every device defined the ResourceSlice
+	// must specify this individually.
+	//
+	// Exactly one of NodeName, NodeSelector, AllNodes, and PerDeviceNodeSelection must be set.
+	//
+	// +optional
+	// +oneOf=NodeSelection
+	// +featureGate=DRAPartitionableDevices
+	PerDeviceNodeSelection *bool
+
+	// SharedCounters defines a list of counter sets, each of which
+	// has a name and a list of counters available.
+	//
+	// The names of the SharedCounters must be unique in the ResourceSlice.
+	//
+	// The maximum number of counters in all sets is 32.
+	//
+	// +optional
+	// +listType=atomic
+	// +featureGate=DRAPartitionableDevices
+	SharedCounters []CounterSet
+}
+
+// CounterSet defines a named set of counters
+// that are available to be used by devices defined in the
+// ResourceSlice.
+//
+// The counters are not allocatable by themselves, but
+// can be referenced by devices. When a device is allocated,
+// the portion of counters it uses will no longer be available for use
+// by other devices.
+type CounterSet struct {
+	// Name defines the name of the counter set.
+	// It must be a DNS label.
+	//
+	// +required
+	Name string
+
+	// Counters defines the set of counters for this CounterSet
+	// The name of each counter must be unique in that set and must be a DNS label.
+	//
+	// The maximum number of counters in all sets is 32.
+	//
+	// +required
+	Counters map[string]Counter
 }
 
 // DriverNameMaxLength is the maximum valid length of a driver name in the
@@ -186,6 +234,10 @@ const ResourceSliceMaxSharedCapacity = 128
 const ResourceSliceMaxDevices = 128
 const PoolNameMaxLength = validation.DNS1123SubdomainMaxLength // Same as for a single node name.
 
+// Defines the max number of shared counters that can be specified
+// in a ResourceSlice. The number is summed up across all sets.
+const ResourceSliceMaxSharedCounters = 32
+
 // Device represents one individual hardware instance that can be selected based
 // on its attributes. Besides the name, exactly one field must be set.
 type Device struct {
@@ -195,15 +247,6 @@ type Device struct {
 	// +required
 	Name string
 
-	// Basic defines one device instance.
-	//
-	// +optional
-	// +oneOf=deviceType
-	Basic *BasicDevice
-}
-
-// BasicDevice defines one device instance.
-type BasicDevice struct {
 	// Attributes defines the set of attributes for this device.
 	// The name of each attribute must be unique in that set.
 	//
@@ -219,6 +262,86 @@ type BasicDevice struct {
 	//
 	// +optional
 	Capacity map[QualifiedName]DeviceCapacity
+
+	// ConsumesCounters defines a list of references to sharedCounters
+	// and the set of counters that the device will
+	// consume from those counter sets.
+	//
+	// There can only be a single entry per counterSet.
+	//
+	// The total number of device counter consumption entries
+	// must be <= 32. In addition, the total number in the
+	// entire ResourceSlice must be <= 1024 (for example,
+	// 64 devices with 16 counters each).
+	//
+	// +optional
+	// +listType=atomic
+	// +featureGate=DRAPartitionableDevices
+	ConsumesCounters []DeviceCounterConsumption
+
+	// NodeName identifies the node where the device is available.
+	//
+	// Must only be set if Spec.PerDeviceNodeSelection is set to true.
+	// At most one of NodeName, NodeSelector and AllNodes can be set.
+	//
+	// +optional
+	// +oneOf=DeviceNodeSelection
+	// +featureGate=DRAPartitionableDevices
+	NodeName *string
+
+	// NodeSelector defines the nodes where the device is available.
+	//
+	// Must use exactly one term.
+	//
+	// Must only be set if Spec.PerDeviceNodeSelection is set to true.
+	// At most one of NodeName, NodeSelector and AllNodes can be set.
+	//
+	// +optional
+	// +oneOf=DeviceNodeSelection
+	// +featureGate=DRAPartitionableDevices
+	NodeSelector *core.NodeSelector
+
+	// AllNodes indicates that all nodes have access to the device.
+	//
+	// Must only be set if Spec.PerDeviceNodeSelection is set to true.
+	// At most one of NodeName, NodeSelector and AllNodes can be set.
+	//
+	// +optional
+	// +oneOf=DeviceNodeSelection
+	// +featureGate=DRAPartitionableDevices
+	AllNodes *bool
+
+	// If specified, these are the driver-defined taints.
+	//
+	// The maximum number of taints is 4.
+	//
+	// This is an alpha field and requires enabling the DRADeviceTaints
+	// feature gate.
+	//
+	// +optional
+	// +listType=atomic
+	// +featureGate=DRADeviceTaints
+	Taints []DeviceTaint
+}
+
+// DeviceCounterConsumption defines a set of counters that
+// a device will consume from a CounterSet.
+type DeviceCounterConsumption struct {
+	// CounterSet is the name of the set from which the
+	// counters defined will be consumed.
+	//
+	// +required
+	CounterSet string
+
+	// Counters defines the counters that will be consumed by the device.
+	//
+	// The maximum number counters in a device is 32.
+	// In addition, the maximum number of all counters
+	// in all devices is 1024 (for example, 64 devices with
+	// 16 counters each).
+	//
+	// +required
+	Counters map[string]Counter
 }
 
 // DeviceCapacity describes a quantity associated with a device.
@@ -232,8 +355,24 @@ type DeviceCapacity struct {
 	// capacity (= share a single device between different consumers).
 }
 
+// Counter describes a quantity associated with a device.
+type Counter struct {
+	// Value defines how much of a certain device counter is available.
+	//
+	// +required
+	Value resource.Quantity
+}
+
 // Limit for the sum of the number of entries in both attributes and capacity.
 const ResourceSliceMaxAttributesAndCapacitiesPerDevice = 32
+
+// Limit for the total number of counters in each device.
+const ResourceSliceMaxCountersPerDevice = 32
+
+// Limit for the total number of counters defined in devices in
+// a ResourceSlice. We want to allow up to 64 devices to specify
+// up to 16 counters, so the limit for the ResourceSlice will be 1024.
+const ResourceSliceMaxDeviceCountersPerSlice = 1024 // 64 * 16
 
 // QualifiedName is the name of a device attribute or capacity.
 //
@@ -296,6 +435,64 @@ type DeviceAttribute struct {
 
 // DeviceAttributeMaxValueLength is the maximum length of a string or version attribute value.
 const DeviceAttributeMaxValueLength = 64
+
+// DeviceTaintsMaxLength is the maximum number of taints per device.
+const DeviceTaintsMaxLength = 4
+
+// The device this taint is attached to has the "effect" on
+// any claim which does not tolerate the taint and, through the claim,
+// to pods using the claim.
+type DeviceTaint struct {
+	// The taint key to be applied to a device.
+	// Must be a label name.
+	//
+	// +required
+	Key string
+
+	// The taint value corresponding to the taint key.
+	// Must be a label value.
+	//
+	// +optional
+	Value string
+
+	// The effect of the taint on claims that do not tolerate the taint
+	// and through such claims on the pods using them.
+	// Valid effects are NoSchedule and NoExecute. PreferNoSchedule as used for
+	// nodes is not valid here.
+	//
+	// +required
+	Effect DeviceTaintEffect
+
+	// ^^^^
+	//
+	// Implementing PreferNoSchedule would depend on a scoring solution for DRA.
+	// It might get added as part of that.
+
+	// TimeAdded represents the time at which the taint was added.
+	// Added automatically during create or update if not set.
+	//
+	// +optional
+	TimeAdded *metav1.Time
+
+	// ^^^
+	//
+	// This field was defined as "It is only written for NoExecute taints." for node taints.
+	// But in practice, Kubernetes never did anything with it (no validation, no defaulting,
+	// ignored during pod eviction in pkg/controller/tainteviction).
+}
+
+// +enum
+type DeviceTaintEffect string
+
+const (
+	// Do not allow new pods to schedule which use a tainted device unless they tolerate the taint,
+	// but allow all pods submitted to Kubelet without going through the scheduler
+	// to start, and allow all already-running pods to continue running.
+	DeviceTaintEffectNoSchedule DeviceTaintEffect = "NoSchedule"
+
+	// Evict any already-running pods that do not tolerate the device taint.
+	DeviceTaintEffectNoExecute DeviceTaintEffect = "NoExecute"
+)
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
@@ -385,27 +582,71 @@ const (
 	DeviceConfigMaxSize      = 32
 )
 
+// DRAAdminNamespaceLabelKey is a label key used to grant administrative access
+// to certain resource.k8s.io API types within a namespace. When this label is
+// set on a namespace with the value "true" (case-sensitive), it allows the use
+// of adminAccess: true in any namespaced resource.k8s.io API types. Currently,
+// this permission applies to ResourceClaim and ResourceClaimTemplate objects.
+const (
+	DRAAdminNamespaceLabelKey = "resource.k8s.io/admin-access"
+)
+
 // DeviceRequest is a request for devices required for a claim.
 // This is typically a request for a single resource like a device, but can
-// also ask for several identical devices.
+// also ask for several identical devices. With FirstAvailable it is also
+// possible to provide a prioritized list of requests.
 type DeviceRequest struct {
 	// Name can be used to reference this request in a pod.spec.containers[].resources.claims
 	// entry and in a constraint of the claim.
 	//
-	// Must be a DNS label and unique among all DeviceRequests in a
-	// ResourceClaim.
+	// References using the name in the DeviceRequest will uniquely
+	// identify a request when the Exactly field is set. When the
+	// FirstAvailable field is set, a reference to the name of the
+	// DeviceRequest will match whatever subrequest is chosen by the
+	// scheduler.
+	//
+	// Must be a DNS label.
 	//
 	// +required
 	Name string
 
+	// Exactly specifies the details for a single request that must
+	// be met exactly for the request to be satisfied.
+	//
+	// One of Exactly or FirstAvailable must be set.
+	//
+	// +optional
+	// +oneOf=deviceRequestType
+	Exactly *ExactDeviceRequest
+
+	// FirstAvailable contains subrequests, of which exactly one will be
+	// selected by the scheduler. It tries to
+	// satisfy them in the order in which they are listed here. So if
+	// there are two entries in the list, the scheduler will only check
+	// the second one if it determines that the first one can not be used.
+	//
+	// DRA does not yet implement scoring, so the scheduler will
+	// select the first set of devices that satisfies all the
+	// requests in the claim. And if the requirements can
+	// be satisfied on more than one node, other scheduling features
+	// will determine which node is chosen. This means that the set of
+	// devices allocated to a claim might not be the optimal set
+	// available to the cluster. Scoring will be implemented later.
+	//
+	// +optional
+	// +oneOf=deviceRequestType
+	// +listType=atomic
+	// +featureGate=DRAPrioritizedList
+	FirstAvailable []DeviceSubRequest
+}
+
+// ExactDeviceRequest is a request for one or more identical devices.
+type ExactDeviceRequest struct {
 	// DeviceClassName references a specific DeviceClass, which can define
 	// additional configuration and selectors to be inherited by this
 	// request.
 	//
-	// A class is required if no subrequests are specified in the
-	// firstAvailable list and no class can be set if subrequests
-	// are specified in the firstAvailable list.
-	// Which classes are available depends on the cluster.
+	// A DeviceClassName is required.
 	//
 	// Administrators may use this to restrict which devices may get
 	// requested by only installing classes with selectors for permitted
@@ -413,17 +654,13 @@ type DeviceRequest struct {
 	// then administrators can create an empty DeviceClass for users
 	// to reference.
 	//
-	// +optional
-	// +oneOf=deviceRequestType
+	// +required
 	DeviceClassName string
 
 	// Selectors define criteria which must be satisfied by a specific
 	// device in order for that device to be considered for this
 	// request. All selectors must be satisfied for a device to be
 	// considered.
-	//
-	// This field can only be set when deviceClassName is set and no subrequests
-	// are specified in the firstAvailable list.
 	//
 	// +optional
 	// +listType=atomic
@@ -445,9 +682,6 @@ type DeviceRequest struct {
 	// the mode is ExactCount and count is not specified, the default count is
 	// one. Any other requests must specify this field.
 	//
-	// This field can only be set when deviceClassName is set and no subrequests
-	// are specified in the firstAvailable list.
-	//
 	// More modes may get added in the future. Clients must refuse to handle
 	// requests with unknown modes.
 	//
@@ -456,9 +690,6 @@ type DeviceRequest struct {
 
 	// Count is used only when the count mode is "ExactCount". Must be greater than zero.
 	// If AllocationMode is ExactCount and this field is not specified, the default is one.
-	//
-	// This field can only be set when deviceClassName is set and no subrequests
-	// are specified in the firstAvailable list.
 	//
 	// +optional
 	// +oneOf=AllocationMode
@@ -470,9 +701,6 @@ type DeviceRequest struct {
 	// all ordinary claims to the device with respect to access modes and
 	// any resource allocations.
 	//
-	// This field can only be set when deviceClassName is set and no subrequests
-	// are specified in the firstAvailable list.
-	//
 	// This is an alpha field and requires enabling the DRAAdminAccess
 	// feature gate. Admin access is disabled if this field is unset or
 	// set to false, otherwise it is enabled.
@@ -481,27 +709,28 @@ type DeviceRequest struct {
 	// +featureGate=DRAAdminAccess
 	AdminAccess *bool
 
-	// FirstAvailable contains subrequests, of which exactly one will be
-	// satisfied by the scheduler to satisfy this request. It tries to
-	// satisfy them in the order in which they are listed here. So if
-	// there are two entries in the list, the scheduler will only check
-	// the second one if it determines that the first one cannot be used.
+	// If specified, the request's tolerations.
 	//
-	// This field may only be set in the entries of DeviceClaim.Requests.
+	// Tolerations for NoSchedule are required to allocate a
+	// device which has a taint with that effect. The same applies
+	// to NoExecute.
 	//
-	// DRA does not yet implement scoring, so the scheduler will
-	// select the first set of devices that satisfies all the
-	// requests in the claim. And if the requirements can
-	// be satisfied on more than one node, other scheduling features
-	// will determine which node is chosen. This means that the set of
-	// devices allocated to a claim might not be the optimal set
-	// available to the cluster. Scoring will be implemented later.
+	// In addition, should any of the allocated devices get tainted
+	// with NoExecute after allocation and that effect is not tolerated,
+	// then all pods consuming the ResourceClaim get deleted to evict
+	// them. The scheduler will not let new pods reserve the claim while
+	// it has these tainted devices. Once all pods are evicted, the
+	// claim will get deallocated.
+	//
+	// The maximum number of tolerations is 16.
+	//
+	// This is an alpha field and requires enabling the DRADeviceTaints
+	// feature gate.
 	//
 	// +optional
-	// +oneOf=deviceRequestType
 	// +listType=atomic
-	// +featureGate=DRAPrioritizedList
-	FirstAvailable []DeviceSubRequest
+	// +featureGate=DRADeviceTaints
+	Tolerations []DeviceToleration
 }
 
 // DeviceSubRequest describes a request for device provided in the
@@ -509,10 +738,9 @@ type DeviceRequest struct {
 // is typically a request for a single resource like a device, but can
 // also ask for several identical devices.
 //
-// DeviceSubRequest is similar to Request, but doesn't expose the AdminAccess
-// or FirstAvailable fields, as those can only be set on the top-level request.
-// AdminAccess is not supported for requests with a prioritized list, and
-// recursive FirstAvailable fields are not supported.
+// DeviceSubRequest is similar to ExactDeviceRequest, but doesn't expose the
+// AdminAccess field as that one is only supported when requesting a
+// specific device.
 type DeviceSubRequest struct {
 	// Name can be used to reference this subrequest in the list of constraints
 	// or the list of configurations for the claim. References must use the
@@ -558,7 +786,7 @@ type DeviceSubRequest struct {
 	//   Allocation will fail if some devices are already allocated,
 	//   unless adminAccess is requested.
 	//
-	// If AlloctionMode is not specified, the default mode is ExactCount. If
+	// If AllocationMode is not specified, the default mode is ExactCount. If
 	// the mode is ExactCount and count is not specified, the default count is
 	// one. Any other subrequests must specify this field.
 	//
@@ -574,11 +802,35 @@ type DeviceSubRequest struct {
 	// +optional
 	// +oneOf=AllocationMode
 	Count int64
+
+	// If specified, the request's tolerations.
+	//
+	// Tolerations for NoSchedule are required to allocate a
+	// device which has a taint with that effect. The same applies
+	// to NoExecute.
+	//
+	// In addition, should any of the allocated devices get tainted
+	// with NoExecute after allocation and that effect is not tolerated,
+	// then all pods consuming the ResourceClaim get deleted to evict
+	// them. The scheduler will not let new pods reserve the claim while
+	// it has these tainted devices. Once all pods are evicted, the
+	// claim will get deallocated.
+	//
+	// The maximum number of tolerations is 16.
+	//
+	// This is an alpha field and requires enabling the DRADeviceTaints
+	// feature gate.
+	//
+	// +optional
+	// +listType=atomic
+	// +featureGate=DRADeviceTaints
+	Tolerations []DeviceToleration
 }
 
 const (
 	DeviceSelectorsMaxSize             = 32
 	FirstAvailableDeviceRequestMaxSize = 8
+	DeviceTolerationsMaxLength         = 16
 )
 
 type DeviceAllocationMode string
@@ -784,6 +1036,59 @@ type OpaqueDeviceConfiguration struct {
 // [OpaqueDeviceConfiguration.Parameters] field.
 const OpaqueParametersMaxLength = 10 * 1024
 
+// The ResourceClaim this DeviceToleration is attached to tolerates any taint that matches
+// the triple <key,value,effect> using the matching operator <operator>.
+type DeviceToleration struct {
+	// Key is the taint key that the toleration applies to. Empty means match all taint keys.
+	// If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+	// Must be a label name.
+	//
+	// +optional
+	Key string
+
+	// Operator represents a key's relationship to the value.
+	// Valid operators are Exists and Equal. Defaults to Equal.
+	// Exists is equivalent to wildcard for value, so that a ResourceClaim can
+	// tolerate all taints of a particular category.
+	//
+	// +optional
+	// +default="Equal"
+	Operator DeviceTolerationOperator
+
+	// Value is the taint value the toleration matches to.
+	// If the operator is Exists, the value must be empty, otherwise just a regular string.
+	// Must be a label value.
+	//
+	// +optional
+	Value string
+
+	// Effect indicates the taint effect to match. Empty means match all taint effects.
+	// When specified, allowed values are NoSchedule and NoExecute.
+	//
+	// +optional
+	Effect DeviceTaintEffect
+
+	// TolerationSeconds represents the period of time the toleration (which must be
+	// of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+	// it is not set, which means tolerate the taint forever (do not evict). Zero and
+	// negative values will be treated as 0 (evict immediately) by the system.
+	// If larger than zero, the time when the pod needs to be evicted is calculated as <time when
+	// taint was adedd> + <toleration seconds>.
+	//
+	// +optional
+	TolerationSeconds *int64
+}
+
+// A toleration operator is the set of operators that can be used in a toleration.
+//
+// +enum
+type DeviceTolerationOperator string
+
+const (
+	DeviceTolerationOpExists DeviceTolerationOperator = "Exists"
+	DeviceTolerationOpEqual  DeviceTolerationOperator = "Equal"
+)
+
 // ResourceClaimStatus tracks whether the resource has been allocated and what
 // the result of that was.
 type ResourceClaimStatus struct {
@@ -954,6 +1259,19 @@ type DeviceRequestAllocationResult struct {
 	// +optional
 	// +featureGate=DRAAdminAccess
 	AdminAccess *bool
+
+	// A copy of all tolerations specified in the request at the time
+	// when the device got allocated.
+	//
+	// The maximum number of tolerations is 16.
+	//
+	// This is an alpha field and requires enabling the DRADeviceTaints
+	// feature gate.
+	//
+	// +optional
+	// +listType=atomic
+	// +featureGate=DRADeviceTaints
+	Tolerations []DeviceToleration
 }
 
 // DeviceAllocationConfiguration gets embedded in an AllocationResult.
@@ -1217,4 +1535,104 @@ type NetworkDeviceData struct {
 	//
 	// +optional
 	HardwareAddress string
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// DeviceTaintRule adds one taint to all devices which match the selector.
+// This has the same effect as if the taint was specified directly
+// in the ResourceSlice by the DRA driver.
+type DeviceTaintRule struct {
+	metav1.TypeMeta
+	// Standard object metadata
+	// +optional
+	metav1.ObjectMeta
+
+	// Spec specifies the selector and one taint.
+	//
+	// Changing the spec automatically increments the metadata.generation number.
+	Spec DeviceTaintRuleSpec
+
+	// ^^^
+	// A spec gets added because adding a status seems likely.
+	// Such a status could provide feedback on applying the
+	// eviction and/or statistics (number of matching devices,
+	// affected allocated claims, pods remaining to be evicted,
+	// etc.).
+}
+
+// DeviceTaintRuleSpec specifies the selector and one taint.
+type DeviceTaintRuleSpec struct {
+	// DeviceSelector defines which device(s) the taint is applied to.
+	// All selector criteria must be satified for a device to
+	// match. The empty selector matches all devices. Without
+	// a selector, no devices are matches.
+	//
+	// +optional
+	DeviceSelector *DeviceTaintSelector
+
+	// The taint that gets applied to matching devices.
+	//
+	// +required
+	Taint DeviceTaint
+}
+
+// DeviceTaintSelector defines which device(s) a DeviceTaintRule applies to.
+// The empty selector matches all devices. Without a selector, no devices
+// are matched.
+type DeviceTaintSelector struct {
+	// If DeviceClassName is set, the selectors defined there must be
+	// satisfied by a device to be selected. This field corresponds
+	// to class.metadata.name.
+	//
+	// +optional
+	DeviceClassName *string
+
+	// If driver is set, only devices from that driver are selected.
+	// This fields corresponds to slice.spec.driver.
+	//
+	// +optional
+	Driver *string
+
+	// If pool is set, only devices in that pool are selected.
+	//
+	// Also setting the driver name may be useful to avoid
+	// ambiguity when different drivers use the same pool name,
+	// but this is not required because selecting pools from
+	// different drivers may also be useful, for example when
+	// drivers with node-local devices use the node name as
+	// their pool name.
+	//
+	// +optional
+	Pool *string
+
+	// If device is set, only devices with that name are selected.
+	// This field corresponds to slice.spec.devices[].name.
+	//
+	// Setting also driver and pool may be required to avoid ambiguity,
+	// but is not required.
+	//
+	// +optional
+	Device *string
+
+	// Selectors contains the same selection criteria as a ResourceClaim.
+	// Currently, CEL expressions are supported. All of these selectors
+	// must be satisfied.
+	//
+	// +optional
+	// +listType=atomic
+	Selectors []DeviceSelector
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// DeviceTaintRuleList is a collection of DeviceTaintRules.
+type DeviceTaintRuleList struct {
+	metav1.TypeMeta
+	// Standard list metadata
+	// +optional
+	metav1.ListMeta
+
+	// Items is the list of DeviceTaintRules.
+	Items []DeviceTaintRule
 }

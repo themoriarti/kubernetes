@@ -212,6 +212,8 @@ func TestUpdateNominatedNodeName(t *testing.T) {
 		for _, qHintEnabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s, with queuehint(%v)", tt.name, qHintEnabled), func(t *testing.T) {
 				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerQueueingHints, qHintEnabled)
+				// Set the SchedulerPopFromBackoffQ feature to false, because when it's enabled, we can't be sure the pod won't be popped from the backoffQ.
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SchedulerPopFromBackoffQ, false)
 
 				testCtx, teardown := schedulerutils.InitTestSchedulerForFrameworkTest(t, testContext, 0, true,
 					scheduler.WithClock(fakeClock),
@@ -224,6 +226,11 @@ func TestUpdateNominatedNodeName(t *testing.T) {
 				_, err := testutils.CreateNode(testCtx.ClientSet, testNode)
 				if err != nil {
 					t.Fatalf("Creating node error: %v", err)
+				}
+
+				// Ensure node is present in scheduler cache.
+				if err := testutils.WaitForNodesInCache(testCtx.Ctx, testCtx.Scheduler, 1); err != nil {
+					t.Fatalf("Waiting for node in cache error: %v", err)
 				}
 
 				// Create initial low-priority pod and wait until it's scheduled.
@@ -265,8 +272,8 @@ func TestUpdateNominatedNodeName(t *testing.T) {
 				// Note that the update has to happen since the nominated pod is still in the backoffQ to actually test updates of nominated, but not bound yet pods.
 				tt.updateFunc(testCtx)
 
-				// Advance time by the maxPodBackoffSeconds to move low priority pod out of the backoff queue.
-				fakeClock.Step(testBackoff)
+				// Advance time by the 2 * maxPodBackoffSeconds to move low priority pod out of the backoff queue.
+				fakeClock.Step(2 * testBackoff)
 
 				// Expect the low-priority pod is notified about unnominated mid-pririty pod and gets scheduled, as it should fit this time.
 				if err := testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, podLow); err != nil {

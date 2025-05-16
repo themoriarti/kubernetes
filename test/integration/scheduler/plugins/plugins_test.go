@@ -309,14 +309,18 @@ var _ framework.PreFilterPlugin = &PreFilterPlugin{}
 var _ framework.PostFilterPlugin = &PostFilterPlugin{}
 var _ framework.ScorePlugin = &ScorePlugin{}
 var _ framework.FilterPlugin = &FilterPlugin{}
+var _ framework.EnqueueExtensions = &FilterPlugin{}
 var _ framework.ScorePlugin = &ScorePlugin{}
 var _ framework.ScorePlugin = &ScoreWithNormalizePlugin{}
+var _ framework.EnqueueExtensions = &ScorePlugin{}
 var _ framework.ReservePlugin = &ReservePlugin{}
 var _ framework.PreScorePlugin = &PreScorePlugin{}
 var _ framework.PreBindPlugin = &PreBindPlugin{}
+var _ framework.EnqueueExtensions = &PreBindPlugin{}
 var _ framework.BindPlugin = &BindPlugin{}
 var _ framework.PostBindPlugin = &PostBindPlugin{}
 var _ framework.PermitPlugin = &PermitPlugin{}
+var _ framework.EnqueueExtensions = &PermitPlugin{}
 var _ framework.QueueSortPlugin = &QueueSortPlugin{}
 
 func (ep *QueueSortPlugin) Name() string {
@@ -377,6 +381,10 @@ func (sp *ScorePlugin) ScoreExtensions() framework.ScoreExtensions {
 	return nil
 }
 
+func (sp *ScorePlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	return nil, nil
+}
+
 // Name returns name of the score plugin.
 func (sp *ScoreWithNormalizePlugin) Name() string {
 	return scoreWithNormalizePluginName
@@ -425,6 +433,12 @@ func (fp *FilterPlugin) Filter(ctx context.Context, state *framework.CycleState,
 	}
 
 	return nil
+}
+
+func (fp *FilterPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	return []framework.ClusterEventWithHint{
+		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.Delete}},
+	}, nil
 }
 
 // Name returns name of the plugin.
@@ -491,6 +505,10 @@ func (pp *PreBindPlugin) PreBind(ctx context.Context, state *framework.CycleStat
 	return nil
 }
 
+func (pp *PreBindPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	return nil, nil
+}
+
 const bindPluginAnnotation = "bindPluginName"
 
 func (bp *BindPlugin) Name() string {
@@ -546,7 +564,7 @@ func (pp *PreFilterPlugin) PreFilterExtensions() framework.PreFilterExtensions {
 }
 
 // PreFilter is a test function that returns (true, nil) or errors for testing.
-func (pp *PreFilterPlugin) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
+func (pp *PreFilterPlugin) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodes []*framework.NodeInfo) (*framework.PreFilterResult, *framework.Status) {
 	pp.numPreFilterCalled++
 	if pp.failPreFilter {
 		return nil, framework.NewStatus(framework.Error, fmt.Sprintf("injecting failure for pod %v", pod.Name))
@@ -649,6 +667,10 @@ func (pp *PermitPlugin) rejectAllPods() {
 	pp.mutex.Lock()
 	defer pp.mutex.Unlock()
 	pp.fh.IterateOverWaitingPods(func(wp framework.WaitingPod) { wp.Reject(pp.name, "rejectAllPods") })
+}
+
+func (pp *PermitPlugin) EventsToRegister(_ context.Context) ([]framework.ClusterEventWithHint, error) {
+	return nil, nil
 }
 
 // TestPreFilterPlugin tests invocation of prefilter plugins.
@@ -2592,7 +2614,7 @@ func (j *JobPlugin) Name() string {
 	return jobPluginName
 }
 
-func (j *JobPlugin) PreFilter(_ context.Context, _ *framework.CycleState, p *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
+func (j *JobPlugin) PreFilter(_ context.Context, _ *framework.CycleState, p *v1.Pod, nodes []*framework.NodeInfo) (*framework.PreFilterResult, *framework.Status) {
 	labelSelector := labels.SelectorFromSet(labels.Set{"driver": ""})
 	driverPods, err := j.podLister.Pods(p.Namespace).List(labelSelector)
 	if err != nil {

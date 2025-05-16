@@ -372,6 +372,21 @@ func TestDescribeSecret(t *testing.T) {
 	if strings.Contains(out, "YWRtaW4=") || strings.Contains(out, "MWYyZDFlMmU2N2Rm") {
 		t.Errorf("sensitive data should not be shown, unexpected out: %s", out)
 	}
+
+	expectedOut := `Name:         bar
+Namespace:    foo
+Labels:       <none>
+Annotations:  <none>
+
+Type:  
+
+Data
+====
+password:  16 bytes
+username:  8 bytes
+`
+
+	assert.Equal(t, expectedOut, out)
 }
 
 func TestDescribeNamespace(t *testing.T) {
@@ -6388,6 +6403,41 @@ func TestDescribeStatefulSet(t *testing.T) {
 	}
 	expectedOutputs := []string{
 		"bar", "foo", "Containers:", "mytest-image:latest", "Update Strategy", "RollingUpdate", "Partition", "2672",
+	}
+	for _, o := range expectedOutputs {
+		if !strings.Contains(out, o) {
+			t.Errorf("unexpected out: %s", out)
+			break
+		}
+	}
+}
+
+func TestDescribeDaemonSet(t *testing.T) {
+	fake := fake.NewSimpleClientset(&appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"node-role.kubernetes.io/control-plane": "true"},
+			},
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Image: "mytest-image:latest"},
+					},
+				},
+			},
+		},
+	})
+	d := DaemonSetDescriber{fake}
+	out, err := d.Describe("foo", "bar", DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	expectedOutputs := []string{
+		"bar", "foo", "Containers:", "mytest-image:latest", "Selector", "node-role.kubernetes.io/control-plane=true",
 	}
 	for _, o := range expectedOutputs {
 		if !strings.Contains(out, o) {

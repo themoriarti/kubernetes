@@ -28,7 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	helpers "k8s.io/component-helpers/resource"
+	"k8s.io/kubectl/pkg/util/podutils"
 	kubecm "k8s.io/kubernetes/pkg/kubelet/cm"
+	kubeqos "k8s.io/kubernetes/pkg/kubelet/qos"
 	"k8s.io/kubernetes/test/e2e/framework"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
@@ -166,6 +169,7 @@ func makeResizableContainer(tcInfo ResizableContainerInfo) v1.Container {
 func MakePodWithResizableContainers(ns, name, timeStamp string, tcInfo []ResizableContainerInfo) *v1.Pod {
 	testInitContainers, testContainers := separateContainers(tcInfo)
 
+	minGracePeriodSeconds := int64(0)
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -175,10 +179,11 @@ func MakePodWithResizableContainers(ns, name, timeStamp string, tcInfo []Resizab
 			},
 		},
 		Spec: v1.PodSpec{
-			OS:             &v1.PodOS{Name: v1.Linux},
-			InitContainers: testInitContainers,
-			Containers:     testContainers,
-			RestartPolicy:  v1.RestartPolicyOnFailure,
+			OS:                            &v1.PodOS{Name: v1.Linux},
+			InitContainers:                testInitContainers,
+			Containers:                    testContainers,
+			RestartPolicy:                 v1.RestartPolicyOnFailure,
+			TerminationGracePeriodSeconds: &minGracePeriodSeconds,
 		},
 	}
 	return pod
@@ -317,7 +322,7 @@ func VerifyPodContainersCgroupValues(ctx context.Context, f *framework.Framework
 		tc := makeResizableContainer(ci)
 		if tc.Resources.Limits != nil || tc.Resources.Requests != nil {
 			var expectedCPUShares int64
-			var expectedCPULimitString, expectedMemLimitString string
+			var expectedMemLimitString string
 			expectedMemLimitInBytes := tc.Resources.Limits.Memory().Value()
 			cpuRequest := tc.Resources.Requests.Cpu()
 			cpuLimit := tc.Resources.Limits.Cpu()
@@ -326,17 +331,10 @@ func VerifyPodContainersCgroupValues(ctx context.Context, f *framework.Framework
 			} else {
 				expectedCPUShares = int64(kubecm.MilliCPUToShares(cpuRequest.MilliValue()))
 			}
-			cpuQuota := kubecm.MilliCPUToQuota(cpuLimit.MilliValue(), kubecm.QuotaPeriod)
-			if cpuLimit.IsZero() {
-				cpuQuota = -1
-			}
-			expectedCPULimitString = strconv.FormatInt(cpuQuota, 10)
+
+			expectedCPULimits := GetCPULimitCgroupExpectations(cpuLimit)
 			expectedMemLimitString = strconv.FormatInt(expectedMemLimitInBytes, 10)
 			if *podOnCgroupv2Node {
-				if expectedCPULimitString == "-1" {
-					expectedCPULimitString = "max"
-				}
-				expectedCPULimitString = fmt.Sprintf("%s %s", expectedCPULimitString, CPUPeriod)
 				if expectedMemLimitString == "0" {
 					expectedMemLimitString = "max"
 				}
@@ -344,32 +342,35 @@ func VerifyPodContainersCgroupValues(ctx context.Context, f *framework.Framework
 				// https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/2254-cgroup-v2#phase-1-convert-from-cgroups-v1-settings-to-v2
 				expectedCPUShares = int64(1 + ((expectedCPUShares-2)*9999)/262142)
 			}
+
 			if expectedMemLimitString != "0" {
 				errs = append(errs, VerifyCgroupValue(f, pod, ci.Name, cgroupMemLimit, expectedMemLimitString))
 			}
-			errs = append(errs, VerifyCgroupValue(f, pod, ci.Name, cgroupCPULimit, expectedCPULimitString))
+			errs = append(errs, VerifyCgroupValue(f, pod, ci.Name, cgroupCPULimit, expectedCPULimits...))
 			errs = append(errs, VerifyCgroupValue(f, pod, ci.Name, cgroupCPURequest, strconv.FormatInt(expectedCPUShares, 10)))
+			// TODO(vinaykul,InPlacePodVerticalScaling): Verify oom_score_adj when runc adds support for updating it
+			// See https://github.com/opencontainers/runc/pull/4669
 		}
 	}
 	return utilerrors.NewAggregate(errs)
 }
 
-func verifyPodRestarts(pod *v1.Pod, wantInfo []ResizableContainerInfo) error {
+func verifyPodRestarts(f *framework.Framework, pod *v1.Pod, wantInfo []ResizableContainerInfo) error {
 	ginkgo.GinkgoHelper()
 
 	initCtrStatuses, ctrStatuses := separateContainerStatuses(wantInfo)
 	errs := []error{}
-	if err := verifyContainerRestarts(pod.Status.InitContainerStatuses, initCtrStatuses); err != nil {
+	if err := verifyContainerRestarts(f, pod, pod.Status.InitContainerStatuses, initCtrStatuses); err != nil {
 		errs = append(errs, err)
 	}
-	if err := verifyContainerRestarts(pod.Status.ContainerStatuses, ctrStatuses); err != nil {
+	if err := verifyContainerRestarts(f, pod, pod.Status.ContainerStatuses, ctrStatuses); err != nil {
 		errs = append(errs, err)
 	}
 
 	return utilerrors.NewAggregate(errs)
 }
 
-func verifyContainerRestarts(gotStatuses []v1.ContainerStatus, wantStatuses []v1.ContainerStatus) error {
+func verifyContainerRestarts(f *framework.Framework, pod *v1.Pod, gotStatuses []v1.ContainerStatus, wantStatuses []v1.ContainerStatus) error {
 	ginkgo.GinkgoHelper()
 
 	if len(gotStatuses) != len(wantStatuses) {
@@ -381,9 +382,32 @@ func verifyContainerRestarts(gotStatuses []v1.ContainerStatus, wantStatuses []v1
 	for i, gotStatus := range gotStatuses {
 		if gotStatus.RestartCount != wantStatuses[i].RestartCount {
 			errs = append(errs, fmt.Errorf("unexpected number of restarts for container %s: got %d, want %d", gotStatus.Name, gotStatus.RestartCount, wantStatuses[i].RestartCount))
+		} else if gotStatus.RestartCount > 0 {
+			err := verifyOomScoreAdj(f, pod, gotStatus.Name)
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return utilerrors.NewAggregate(errs)
+}
+
+func verifyOomScoreAdj(f *framework.Framework, pod *v1.Pod, containerName string) error {
+	container := FindContainerInPod(pod, containerName)
+	if container == nil {
+		return fmt.Errorf("failed to find container %s in pod %s", containerName, pod.Name)
+	}
+
+	node, err := f.ClientSet.CoreV1().Nodes().Get(context.Background(), pod.Spec.NodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	nodeMemoryCapacity := node.Status.Capacity[v1.ResourceMemory]
+	oomScoreAdj := kubeqos.GetContainerOOMScoreAdjust(pod, container, int64(nodeMemoryCapacity.Value()))
+	expectedOomScoreAdj := strconv.FormatInt(int64(oomScoreAdj), 10)
+
+	return VerifyOomScoreAdjValue(f, pod, container.Name, expectedOomScoreAdj)
 }
 
 func WaitForPodResizeActuation(ctx context.Context, f *framework.Framework, podClient *PodClient, pod *v1.Pod, expectedContainers []ResizableContainerInfo) *v1.Pod {
@@ -394,7 +418,7 @@ func WaitForPodResizeActuation(ctx context.Context, f *framework.Framework, podC
 		Eventually(ctx, framework.RetryNotFound(framework.GetObject(f.ClientSet.CoreV1().Pods(pod.Namespace).Get, pod.Name, metav1.GetOptions{}))).
 		WithTimeout(f.Timeouts.PodStart).
 		Should(framework.MakeMatcher(func(pod *v1.Pod) (func() string, error) {
-			if pod.Status.Resize == v1.PodResizeStatusInfeasible {
+			if helpers.IsPodResizeInfeasible(pod) {
 				// This is a terminal resize state
 				return func() string {
 					return "resize is infeasible"
@@ -406,6 +430,18 @@ func WaitForPodResizeActuation(ctx context.Context, f *framework.Framework, podC
 				return func() string {
 					return fmt.Sprintf("container status resources don't match expected: %v", formatErrors(resourceErrs))
 				}, nil
+			}
+			// Wait for kubelet to clear the resize status conditions.
+			for _, c := range pod.Status.Conditions {
+				if c.Type == v1.PodResizePending || c.Type == v1.PodResizeInProgress {
+					return func() string {
+						return fmt.Sprintf("resize status %v is still present in the pod status", c)
+					}, nil
+				}
+			}
+			// Wait for the pod to be ready.
+			if !podutils.IsPodReady(pod) {
+				return func() string { return "pod is not ready" }, nil
 			}
 			return nil, nil
 		})),
@@ -427,8 +463,15 @@ func ExpectPodResized(ctx context.Context, f *framework.Framework, resizedPod *v
 	if resourceErrs := VerifyPodStatusResources(resizedPod, expectedContainers); resourceErrs != nil {
 		errs = append(errs, fmt.Errorf("container status resources don't match expected: %w", formatErrors(resourceErrs)))
 	}
-	if restartErrs := verifyPodRestarts(resizedPod, expectedContainers); restartErrs != nil {
+	if restartErrs := verifyPodRestarts(f, resizedPod, expectedContainers); restartErrs != nil {
 		errs = append(errs, fmt.Errorf("container restart counts don't match expected: %w", formatErrors(restartErrs)))
+	}
+
+	// Verify Pod Resize conditions are empty.
+	for _, condition := range resizedPod.Status.Conditions {
+		if condition.Type == v1.PodResizeInProgress || condition.Type == v1.PodResizePending {
+			errs = append(errs, fmt.Errorf("unexpected resize condition type %s found in pod status", condition.Type))
+		}
 	}
 
 	if len(errs) > 0 {
@@ -459,6 +502,24 @@ func ResizeContainerPatch(containers []ResizableContainerInfo) (string, error) {
 	}
 
 	return string(patchBytes), nil
+}
+
+// UpdateExpectedContainerRestarts updates the RestartCounts in expectedContainers by
+// adding them to the existing RestartCounts in the containerStatuses of the provided pod.
+// This reduces the flakiness of the RestartCount assertions by grabbing the current
+// restart count right before the resize operation, and verify the expected increment (0 or 1)
+// rather than the absolute count.
+func UpdateExpectedContainerRestarts(ctx context.Context, pod *v1.Pod, expectedContainers []ResizableContainerInfo) []ResizableContainerInfo {
+	initialRestarts := make(map[string]int32)
+	newExpectedContainers := []ResizableContainerInfo{}
+	for _, ctr := range pod.Status.ContainerStatuses {
+		initialRestarts[ctr.Name] = ctr.RestartCount
+	}
+	for i, ctr := range expectedContainers {
+		newExpectedContainers = append(newExpectedContainers, expectedContainers[i])
+		newExpectedContainers[i].RestartCount += initialRestarts[ctr.Name]
+	}
+	return newExpectedContainers
 }
 
 func formatErrors(err error) error {

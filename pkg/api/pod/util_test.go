@@ -1416,7 +1416,11 @@ func TestDropNodeInclusionPolicyFields(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, test.enabled)
+			if !test.enabled {
+				// TODO: this will be removed in 1.36
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeInclusionPolicyInPodTopologySpread, test.enabled)
+			}
 
 			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
 			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
@@ -2271,7 +2275,10 @@ func Test_dropDisabledMatchLabelKeysFieldInPodAffinity(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, test.enabled)
+			if !test.enabled {
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MatchLabelKeysInPodAffinity, false)
+			}
 
 			dropDisabledFields(test.podSpec, nil, test.oldPodSpec, nil)
 			if diff := cmp.Diff(test.wantPodSpec, test.podSpec); diff != "" {
@@ -2675,7 +2682,6 @@ func TestDropInPlacePodVerticalScaling(t *testing.T) {
 				},
 			},
 			Status: api.PodStatus{
-				Resize: api.PodResizeStatusInProgress,
 				ContainerStatuses: []api.ContainerStatus{
 					{
 						Name:               "c1",
@@ -2741,64 +2747,55 @@ func TestDropInPlacePodVerticalScaling(t *testing.T) {
 		t.Run(fmt.Sprintf("InPlacePodVerticalScaling=%t", ippvsEnabled), func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, ippvsEnabled)
 
-			for _, allocatedStatusEnabled := range []bool{true, false} {
-				t.Run(fmt.Sprintf("AllocatedStatus=%t", allocatedStatusEnabled), func(t *testing.T) {
-					featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScalingAllocatedStatus, allocatedStatusEnabled)
-
-					for _, oldPodInfo := range podInfo {
-						for _, newPodInfo := range podInfo {
-							oldPodHasInPlaceVerticalScaling, oldPod := oldPodInfo.hasInPlaceVerticalScaling, oldPodInfo.pod()
-							newPodHasInPlaceVerticalScaling, newPod := newPodInfo.hasInPlaceVerticalScaling, newPodInfo.pod()
-							if newPod == nil {
-								continue
-							}
-
-							t.Run(fmt.Sprintf("old pod %v, new pod %v", oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
-								var oldPodSpec *api.PodSpec
-								var oldPodStatus *api.PodStatus
-								if oldPod != nil {
-									oldPodSpec = &oldPod.Spec
-									oldPodStatus = &oldPod.Status
-								}
-								dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
-								dropDisabledPodStatusFields(&newPod.Status, oldPodStatus, &newPod.Spec, oldPodSpec)
-
-								// old pod should never be changed
-								if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
-									t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
-								}
-
-								switch {
-								case ippvsEnabled || oldPodHasInPlaceVerticalScaling:
-									// new pod shouldn't change if feature enabled or if old pod has ResizePolicy set
-									expected := newPodInfo.pod()
-									if !ippvsEnabled || !allocatedStatusEnabled {
-										expected.Status.ContainerStatuses[0].AllocatedResources = nil
-									}
-									if !reflect.DeepEqual(newPod, expected) {
-										t.Errorf("new pod changed: %v", cmp.Diff(newPod, expected))
-									}
-								case newPodHasInPlaceVerticalScaling:
-									// new pod should be changed
-									if reflect.DeepEqual(newPod, newPodInfo.pod()) {
-										t.Errorf("new pod was not changed")
-									}
-									// new pod should not have ResizePolicy
-									if !reflect.DeepEqual(newPod, podWithoutInPlaceVerticalScaling()) {
-										t.Errorf("new pod has ResizePolicy: %v", cmp.Diff(newPod, podWithoutInPlaceVerticalScaling()))
-									}
-								default:
-									// new pod should not need to be changed
-									if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
-										t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
-									}
-								}
-							})
-						}
+			for _, oldPodInfo := range podInfo {
+				for _, newPodInfo := range podInfo {
+					oldPodHasInPlaceVerticalScaling, oldPod := oldPodInfo.hasInPlaceVerticalScaling, oldPodInfo.pod()
+					newPodHasInPlaceVerticalScaling, newPod := newPodInfo.hasInPlaceVerticalScaling, newPodInfo.pod()
+					if newPod == nil {
+						continue
 					}
 
-				})
+					t.Run(fmt.Sprintf("old pod %v, new pod %v", oldPodInfo.description, newPodInfo.description), func(t *testing.T) {
+						var oldPodSpec *api.PodSpec
+						var oldPodStatus *api.PodStatus
+						if oldPod != nil {
+							oldPodSpec = &oldPod.Spec
+							oldPodStatus = &oldPod.Status
+						}
+						dropDisabledFields(&newPod.Spec, nil, oldPodSpec, nil)
+						dropDisabledPodStatusFields(&newPod.Status, oldPodStatus, &newPod.Spec, oldPodSpec)
+
+						// old pod should never be changed
+						if !reflect.DeepEqual(oldPod, oldPodInfo.pod()) {
+							t.Errorf("old pod changed: %v", cmp.Diff(oldPod, oldPodInfo.pod()))
+						}
+
+						switch {
+						case ippvsEnabled || oldPodHasInPlaceVerticalScaling:
+							// new pod shouldn't change if feature enabled or if old pod has ResizePolicy set
+							expected := newPodInfo.pod()
+							if !reflect.DeepEqual(newPod, expected) {
+								t.Errorf("new pod changed: %v", cmp.Diff(newPod, expected))
+							}
+						case newPodHasInPlaceVerticalScaling:
+							// new pod should be changed
+							if reflect.DeepEqual(newPod, newPodInfo.pod()) {
+								t.Errorf("new pod was not changed")
+							}
+							// new pod should not have ResizePolicy
+							if !reflect.DeepEqual(newPod, podWithoutInPlaceVerticalScaling()) {
+								t.Errorf("new pod has ResizePolicy: %v", cmp.Diff(newPod, podWithoutInPlaceVerticalScaling()))
+							}
+						default:
+							// new pod should not need to be changed
+							if !reflect.DeepEqual(newPod, newPodInfo.pod()) {
+								t.Errorf("new pod changed: %v", cmp.Diff(newPod, newPodInfo.pod()))
+							}
+						}
+					})
+				}
 			}
+
 		})
 	}
 }
@@ -3439,6 +3436,148 @@ func TestDropPodLifecycleSleepAction(t *testing.T) {
 	}
 }
 
+func TestDropContainerStopSignals(t *testing.T) {
+	makeContainer := func(lifecycle *api.Lifecycle) api.Container {
+		container := api.Container{Name: "foo"}
+		if lifecycle != nil {
+			container.Lifecycle = lifecycle
+		}
+		return container
+	}
+
+	makeEphemeralContainer := func(lifecycle *api.Lifecycle) api.EphemeralContainer {
+		container := api.EphemeralContainer{
+			EphemeralContainerCommon: api.EphemeralContainerCommon{Name: "foo"},
+		}
+		if lifecycle != nil {
+			container.Lifecycle = lifecycle
+		}
+		return container
+	}
+
+	makePod := func(os api.OSName, containers []api.Container, initContainers []api.Container, ephemeralContainers []api.EphemeralContainer) *api.PodSpec {
+		return &api.PodSpec{
+			OS:                  &api.PodOS{Name: os},
+			Containers:          containers,
+			InitContainers:      initContainers,
+			EphemeralContainers: ephemeralContainers,
+		}
+	}
+
+	testCases := []struct {
+		featuregateEnabled bool
+		oldLifecycle       *api.Lifecycle
+		newLifecycle       *api.Lifecycle
+		expectedLifecycle  *api.Lifecycle
+	}{
+		// feature gate is turned on and stopsignal is not in use - Lifecycle stays nil
+		{
+			featuregateEnabled: true,
+			oldLifecycle:       nil,
+			newLifecycle:       nil,
+			expectedLifecycle:  nil,
+		},
+		// feature gate is turned off and StopSignal is in use - StopSignal is not dropped
+		{
+			featuregateEnabled: false,
+			oldLifecycle:       &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+			newLifecycle:       &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+			expectedLifecycle:  &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+		},
+		// feature gate is turned off and StopSignal is not in use - Entire lifecycle is dropped
+		{
+			featuregateEnabled: false,
+			oldLifecycle:       &api.Lifecycle{StopSignal: nil},
+			newLifecycle:       &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+			expectedLifecycle:  nil,
+		},
+		// feature gate is turned on and StopSignal is in use - StopSignal is not dropped
+		{
+			featuregateEnabled: true,
+			oldLifecycle:       &api.Lifecycle{StopSignal: nil},
+			newLifecycle:       &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+			expectedLifecycle:  &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM)},
+		},
+		// feature gate is turned off and PreStop is in use - StopSignal alone is dropped
+		{
+			featuregateEnabled: false,
+			oldLifecycle: &api.Lifecycle{StopSignal: nil, PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			newLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			expectedLifecycle: &api.Lifecycle{StopSignal: nil, PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+		},
+		// feature gate is turned on and PreStop is in use - StopSignal is not dropped
+		{
+			featuregateEnabled: true,
+			oldLifecycle: &api.Lifecycle{StopSignal: nil, PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			newLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			expectedLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+		},
+		// feature gate is turned off and PreStop and StopSignal are in use - nothing is dropped
+		{
+			featuregateEnabled: true,
+			oldLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			newLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+			expectedLifecycle: &api.Lifecycle{StopSignal: ptr.To(api.SIGTERM), PreStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"foo"}},
+			}},
+		},
+	}
+
+	for i, tc := range testCases {
+		t.Run(fmt.Sprintf("test_%d", i), func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ContainerStopSignals, tc.featuregateEnabled)
+			// Containers
+			{
+				oldPod := makePod(api.Linux, []api.Container{makeContainer(tc.oldLifecycle.DeepCopy())}, nil, nil)
+				newPod := makePod(api.Linux, []api.Container{makeContainer(tc.newLifecycle.DeepCopy())}, nil, nil)
+				expectedPod := makePod(api.Linux, []api.Container{makeContainer(tc.expectedLifecycle.DeepCopy())}, nil, nil)
+				dropDisabledFields(newPod, nil, oldPod, nil)
+
+				if diff := cmp.Diff(expectedPod, newPod); diff != "" {
+					t.Fatalf("Unexpected modification to new pod; diff (-got +want)\n%s", diff)
+				}
+			}
+			// InitContainers
+			{
+				oldPod := makePod(api.Linux, nil, []api.Container{makeContainer(tc.oldLifecycle.DeepCopy())}, nil)
+				newPod := makePod(api.Linux, nil, []api.Container{makeContainer(tc.newLifecycle.DeepCopy())}, nil)
+				expectPod := makePod(api.Linux, nil, []api.Container{makeContainer(tc.expectedLifecycle.DeepCopy())}, nil)
+				dropDisabledFields(newPod, nil, oldPod, nil)
+				if diff := cmp.Diff(expectPod, newPod); diff != "" {
+					t.Fatalf("Unexpected modification to new pod; diff (-got +want)\n%s", diff)
+				}
+			}
+			// EphemeralContainers
+			{
+				oldPod := makePod(api.Linux, nil, nil, []api.EphemeralContainer{makeEphemeralContainer(tc.oldLifecycle.DeepCopy())})
+				newPod := makePod(api.Linux, nil, nil, []api.EphemeralContainer{makeEphemeralContainer(tc.newLifecycle.DeepCopy())})
+				expectPod := makePod(api.Linux, nil, nil, []api.EphemeralContainer{makeEphemeralContainer(tc.expectedLifecycle.DeepCopy())})
+				dropDisabledFields(newPod, nil, oldPod, nil)
+				if diff := cmp.Diff(expectPod, newPod); diff != "" {
+					t.Fatalf("Unexpected modification to new pod; diff (-got +want)\n%s", diff)
+				}
+			}
+
+		})
+	}
+}
+
 func TestDropSupplementalGroupsPolicy(t *testing.T) {
 	supplementalGroupsPolicyMerge := api.SupplementalGroupsPolicyMerge
 	podWithSupplementalGroupsPolicy := func() *api.Pod {
@@ -4027,12 +4166,15 @@ func TestValidateAllowSidecarResizePolicy(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			gotOptions := GetValidationOptionsFromPodSpecAndMeta(&api.PodSpec{}, tc.oldPodSpec, nil, nil)
-			if tc.wantOption != gotOptions.AllowSidecarResizePolicy {
-				t.Errorf("Got AllowSidecarResizePolicy=%t, want %t", gotOptions.AllowSidecarResizePolicy, tc.wantOption)
-			}
-		})
+		for _, ippvsEnabled := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/%t", tc.name, ippvsEnabled), func(t *testing.T) {
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, ippvsEnabled)
+
+				gotOptions := GetValidationOptionsFromPodSpecAndMeta(&api.PodSpec{}, tc.oldPodSpec, nil, nil)
+				expected := tc.wantOption || ippvsEnabled
+				assert.Equal(t, expected, gotOptions.AllowSidecarResizePolicy, "AllowSidecarResizePolicy")
+			})
+		}
 	}
 }
 
@@ -4114,12 +4256,14 @@ func TestValidateAllowPodLifecycleSleepActionZeroValue(t *testing.T) {
 	testCases := []struct {
 		name                                        string
 		podSpec                                     *api.PodSpec
+		featureEnabled                              bool
 		expectAllowPodLifecycleSleepActionZeroValue bool
 	}{
 		{
-			name:    "no lifecycle hooks",
-			podSpec: &api.PodSpec{},
-			expectAllowPodLifecycleSleepActionZeroValue: false,
+			name:           "no lifecycle hooks",
+			podSpec:        &api.PodSpec{},
+			featureEnabled: true,
+			expectAllowPodLifecycleSleepActionZeroValue: true,
 		},
 		{
 			name: "Prestop with non-zero second duration",
@@ -4136,7 +4280,8 @@ func TestValidateAllowPodLifecycleSleepActionZeroValue(t *testing.T) {
 					},
 				},
 			},
-			expectAllowPodLifecycleSleepActionZeroValue: false,
+			featureEnabled: true,
+			expectAllowPodLifecycleSleepActionZeroValue: true,
 		},
 		{
 			name: "PostStart with non-zero second duration",
@@ -4153,7 +4298,8 @@ func TestValidateAllowPodLifecycleSleepActionZeroValue(t *testing.T) {
 					},
 				},
 			},
-			expectAllowPodLifecycleSleepActionZeroValue: false,
+			featureEnabled: true,
+			expectAllowPodLifecycleSleepActionZeroValue: true,
 		},
 		{
 			name: "PreStop with zero seconds",
@@ -4170,6 +4316,7 @@ func TestValidateAllowPodLifecycleSleepActionZeroValue(t *testing.T) {
 					},
 				},
 			},
+			featureEnabled: true,
 			expectAllowPodLifecycleSleepActionZeroValue: true,
 		},
 		{
@@ -4187,12 +4334,93 @@ func TestValidateAllowPodLifecycleSleepActionZeroValue(t *testing.T) {
 					},
 				},
 			},
+			featureEnabled: true,
+			expectAllowPodLifecycleSleepActionZeroValue: true,
+		},
+		{
+			name:           "no lifecycle hooks with feature gate disabled",
+			podSpec:        &api.PodSpec{},
+			featureEnabled: false,
+			expectAllowPodLifecycleSleepActionZeroValue: false,
+		},
+		{
+			name: "Prestop with non-zero second duration with feature gate disabled",
+			podSpec: &api.PodSpec{
+				Containers: []api.Container{
+					{
+						Lifecycle: &api.Lifecycle{
+							PreStop: &api.LifecycleHandler{
+								Sleep: &api.SleepAction{
+									Seconds: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			featureEnabled: false,
+			expectAllowPodLifecycleSleepActionZeroValue: false,
+		},
+		{
+			name: "PostStart with non-zero second duration with feature gate disabled",
+			podSpec: &api.PodSpec{
+				Containers: []api.Container{
+					{
+						Lifecycle: &api.Lifecycle{
+							PostStart: &api.LifecycleHandler{
+								Sleep: &api.SleepAction{
+									Seconds: 1,
+								},
+							},
+						},
+					},
+				},
+			},
+			featureEnabled: false,
+			expectAllowPodLifecycleSleepActionZeroValue: false,
+		},
+		{
+			name: "PreStop with zero seconds with feature gate disabled",
+			podSpec: &api.PodSpec{
+				Containers: []api.Container{
+					{
+						Lifecycle: &api.Lifecycle{
+							PreStop: &api.LifecycleHandler{
+								Sleep: &api.SleepAction{
+									Seconds: 0,
+								},
+							},
+						},
+					},
+				},
+			},
+			featureEnabled: false,
+			expectAllowPodLifecycleSleepActionZeroValue: true,
+		},
+		{
+			name: "PostStart with zero seconds with feature gate disabled",
+			podSpec: &api.PodSpec{
+				Containers: []api.Container{
+					{
+						Lifecycle: &api.Lifecycle{
+							PostStart: &api.LifecycleHandler{
+								Sleep: &api.SleepAction{
+									Seconds: 0,
+								},
+							},
+						},
+					},
+				},
+			},
+			featureEnabled: false,
 			expectAllowPodLifecycleSleepActionZeroValue: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLifecycleSleepActionAllowZero, tc.featureEnabled)
+
 			gotOptions := GetValidationOptionsFromPodSpecAndMeta(&api.PodSpec{}, tc.podSpec, nil, nil)
 			assert.Equal(t, tc.expectAllowPodLifecycleSleepActionZeroValue, gotOptions.AllowPodLifecycleSleepActionZeroValue, "AllowPodLifecycleSleepActionZeroValue")
 		})

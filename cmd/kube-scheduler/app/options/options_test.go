@@ -306,7 +306,7 @@ profiles:
 						PairName:      "kube-scheduler",
 					},
 					HTTP2MaxStreamsPerConnection: 47,
-				}).WithLoopback(),
+				}),
 				Authentication: &apiserveroptions.DelegatingAuthenticationOptions{
 					CacheTTL:   10 * time.Second,
 					ClientCert: apiserveroptions.ClientCertAuthenticationOptions{},
@@ -413,7 +413,7 @@ profiles:
 						PairName:      "kube-scheduler",
 					},
 					HTTP2MaxStreamsPerConnection: 47,
-				}).WithLoopback(),
+				}),
 				Authentication: &apiserveroptions.DelegatingAuthenticationOptions{
 					CacheTTL:   10 * time.Second,
 					ClientCert: apiserveroptions.ClientCertAuthenticationOptions{},
@@ -487,7 +487,7 @@ profiles:
 						PairName:      "kube-scheduler",
 					},
 					HTTP2MaxStreamsPerConnection: 47,
-				}).WithLoopback(),
+				}),
 				Authentication: &apiserveroptions.DelegatingAuthenticationOptions{
 					CacheTTL: 10 * time.Second,
 					RequestHeader: apiserveroptions.RequestHeaderAuthenticationOptions{
@@ -633,7 +633,8 @@ profiles:
 							{
 								Name: "DynamicResources",
 								Args: &kubeschedulerconfig.DynamicResourcesArgs{
-									FilterTimeout: &metav1.Duration{Duration: 10 * time.Second},
+									FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+									BindingTimeout: &metav1.Duration{Duration: 10 * time.Minute},
 								},
 							},
 							{
@@ -749,7 +750,8 @@ profiles:
 							{
 								Name: "DynamicResources",
 								Args: &kubeschedulerconfig.DynamicResourcesArgs{
-									FilterTimeout: &metav1.Duration{Duration: 10 * time.Second},
+									FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+									BindingTimeout: &metav1.Duration{Duration: 10 * time.Minute},
 								},
 							},
 							{
@@ -895,7 +897,8 @@ profiles:
 							{
 								Name: "DynamicResources",
 								Args: &kubeschedulerconfig.DynamicResourcesArgs{
-									FilterTimeout: &metav1.Duration{Duration: 10 * time.Second},
+									FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+									BindingTimeout: &metav1.Duration{Duration: 10 * time.Minute},
 								},
 							},
 							{

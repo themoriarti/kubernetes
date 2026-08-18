@@ -18,6 +18,7 @@ limitations under the License.
 // +k8s:validation-gen-scheme-registry=k8s.io/code-generator/cmd/validation-gen/testscheme.Scheme
 
 // This is a test package.
+// +k8s:validation-gen-nolint
 package typedef
 
 import "k8s.io/code-generator/cmd/validation-gen/testscheme"
@@ -32,6 +33,9 @@ type Struct struct {
 
 	// +k8s:item(id: "field-target")=+k8s:validateFalse="item DualItems[id=field-target] from field"
 	DualItems DualItemList `json:"dualItems"`
+
+	// +k8s:item(id: "target")=+k8s:validateFalse="item ConflictingItems[id=target] from field"
+	ConflictingItems ConflictingItemList `json:"conflictingItems"`
 }
 
 type Item struct {
@@ -59,3 +63,8 @@ type DualItem struct {
 // +k8s:listMapKey=id
 // +k8s:item(id: "typedef-target")=+k8s:validateFalse="item DualItems[id=typedef-target] from typedef"
 type DualItemList []DualItem
+
+// +k8s:listType=map
+// +k8s:listMapKey=id
+// +k8s:item(id: "target")=+k8s:validateFalse="item ConflictingItems[id=target] from typedef"
+type ConflictingItemList []DualItem

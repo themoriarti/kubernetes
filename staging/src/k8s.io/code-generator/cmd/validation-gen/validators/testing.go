@@ -32,17 +32,24 @@ const (
 
 	// This tag always returns an error from ExtractValidations.
 	validateErrorTagName = "k8s:validateError"
+
+	// validate true alpha/beta  test tags.
+	validateAlphaTagName = "k8s:validateTrueAlpha"
+	validateBetaTagName  = "k8s:validateTrueBeta"
 )
 
 func init() {
 	RegisterTagValidator(fixedResultTagValidator{result: true})
 	RegisterTagValidator(fixedResultTagValidator{result: false})
 	RegisterTagValidator(fixedResultTagValidator{error: true})
+	RegisterTagValidator(fixedResultTagValidator{result: true, stability: TagStabilityLevelAlpha})
+	RegisterTagValidator(fixedResultTagValidator{result: true, stability: TagStabilityLevelBeta})
 }
 
 type fixedResultTagValidator struct {
-	result bool
-	error  bool
+	result    bool
+	error     bool
+	stability TagStabilityLevel
 }
 
 func (fixedResultTagValidator) Init(_ Config) {}
@@ -51,12 +58,19 @@ func (frtv fixedResultTagValidator) TagName() string {
 	if frtv.error {
 		return validateErrorTagName
 	} else if frtv.result {
-		return validateTrueTagName
+		switch frtv.stability {
+		case TagStabilityLevelAlpha:
+			return validateAlphaTagName
+		case TagStabilityLevelBeta:
+			return validateBetaTagName
+		default:
+			return validateTrueTagName
+		}
 	}
 	return validateFalseTagName
 }
 
-var fixedResultTagValidScopes = sets.New(ScopeAny)
+var fixedResultTagValidScopes = sets.New(ScopeType, ScopeField, ScopeListVal, ScopeMapKey, ScopeMapVal)
 
 func (fixedResultTagValidator) ValidScopes() sets.Set[Scope] {
 	return fixedResultTagValidScopes
@@ -73,7 +87,9 @@ func (frtv fixedResultTagValidator) GetValidations(context Context, tag codetags
 	if err != nil {
 		return result, fmt.Errorf("can't decode tag payload: %w", err)
 	}
-	result.AddFunction(Function(frtv.TagName(), args.flags, fixedResultValidator, frtv.result, args.msg).WithTypeArgs(args.typeArgs...))
+	fn := Function(frtv.TagName(), args.flags, fixedResultValidator, frtv.result, args.msg).WithTypeArgs(args.typeArgs...)
+	fn.Cohort = args.cohort
+	result.AddFunction(fn)
 
 	return result, nil
 }
@@ -86,6 +102,7 @@ type fixedResultArgs struct {
 	flags    FunctionFlags
 	msg      string
 	typeArgs []types.Name
+	cohort   string
 }
 
 func (fixedResultTagValidator) toFixedResultArgs(in codetags.Tag) (fixedResultArgs, error) {
@@ -111,6 +128,8 @@ func (fixedResultTagValidator) toFixedResultArgs(in codetags.Tag) (fixedResultAr
 				}
 				result.typeArgs = []types.Name{{Package: "", Name: tn}}
 			}
+		case "cohort":
+			result.cohort = a.Value
 		}
 	}
 	if in.ValueType == codetags.ValueTypeString {
@@ -120,9 +139,14 @@ func (fixedResultTagValidator) toFixedResultArgs(in codetags.Tag) (fixedResultAr
 }
 
 func (frtv fixedResultTagValidator) Docs() TagDoc {
+	tagStabilityLevel := TagStabilityLevelAlpha
+	if frtv.stability != "" {
+		tagStabilityLevel = frtv.stability
+	}
 	doc := TagDoc{
-		Tag:    frtv.TagName(),
-		Scopes: frtv.ValidScopes().UnsortedList(),
+		Tag:            frtv.TagName(),
+		StabilityLevel: tagStabilityLevel,
+		Scopes:         sets.List(frtv.ValidScopes()),
 	}
 	doc.PayloadsType = codetags.ValueTypeString
 	if frtv.error {
@@ -148,6 +172,11 @@ func (frtv fixedResultTagValidator) Docs() TagDoc {
 			Name:        "typeArg",
 			Description: "<string>",
 			Docs:        "The type arg in generated code (must be the value-type, not pointer).",
+			Type:        codetags.ArgTypeString,
+		}, {
+			Name:        "cohort",
+			Description: "<string>",
+			Docs:        "An optional cohort name to group multiple validations.",
 			Type:        codetags.ArgTypeString,
 		}}
 		if frtv.result {

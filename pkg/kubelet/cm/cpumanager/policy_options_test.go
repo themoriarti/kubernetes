@@ -106,30 +106,6 @@ func TestPolicyOptionsAvailable(t *testing.T) {
 			featureGateEnable: true,
 			expectedAvailable: false,
 		},
-		{
-			option:            StrictCPUReservationOption,
-			featureGate:       pkgfeatures.CPUManagerPolicyBetaOptions,
-			featureGateEnable: false,
-			expectedAvailable: false,
-		},
-		{
-			option:            StrictCPUReservationOption,
-			featureGate:       pkgfeatures.CPUManagerPolicyBetaOptions,
-			featureGateEnable: true,
-			expectedAvailable: true,
-		},
-		{
-			option:            PreferAlignByUnCoreCacheOption,
-			featureGate:       pkgfeatures.CPUManagerPolicyBetaOptions,
-			featureGateEnable: false,
-			expectedAvailable: false,
-		},
-		{
-			option:            PreferAlignByUnCoreCacheOption,
-			featureGate:       pkgfeatures.CPUManagerPolicyBetaOptions,
-			featureGateEnable: true,
-			expectedAvailable: true,
-		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.option, func(t *testing.T) {
@@ -146,11 +122,15 @@ func TestPolicyOptionsAvailable(t *testing.T) {
 func TestPolicyOptionsAlwaysAvailableOnceGA(t *testing.T) {
 	options := []string{
 		FullPCPUsOnlyOption,
+		StrictCPUReservationOption,
+		PreferAlignByUnCoreCacheOption,
 	}
 	for _, option := range options {
 		t.Run(option, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.CPUManagerPolicyAlphaOptions, false)
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.CPUManagerPolicyBetaOptions, false)
+			featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				pkgfeatures.CPUManagerPolicyAlphaOptions: false,
+				pkgfeatures.CPUManagerPolicyBetaOptions:  false,
+			})
 			if err := CheckPolicyOptionAvailable(option); err != nil {
 				t.Errorf("option %q should be available even with all featuregate disabled", option)
 			}

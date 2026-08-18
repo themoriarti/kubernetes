@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
+	"k8s.io/kubernetes/pkg/controller/volume/selinuxwarning/internal/parse"
 	"k8s.io/kubernetes/pkg/controller/volume/selinuxwarning/translator"
 )
 
@@ -43,6 +44,39 @@ func sortConflicts(conflicts []Conflict) {
 	sort.Slice(conflicts, func(i, j int) bool {
 		return conflicts[i].Pod.String() < conflicts[j].Pod.String()
 	})
+}
+
+// verifyReverseIndexConsistency checks that forward and reverse indexes are symmetric
+func verifyReverseIndexConsistency(t *testing.T, c *volumeCache) {
+	t.Helper()
+
+	// For every (pod, volume) in reverse index, verify it exists in forward index.
+	for podKey, volumes := range c.podToVolumes {
+		for volumeName := range volumes {
+			volume, found := c.volumes[volumeName]
+			if !found {
+				t.Errorf("Reverse index has pod %s -> volume %s, but volume not in forward index", podKey, volumeName)
+				continue
+			}
+			if _, found := volume.pods[podKey]; !found {
+				t.Errorf("Reverse index has pod %s -> volume %s, but pod not in volume's pod list", podKey, volumeName)
+			}
+		}
+	}
+
+	// For every (volume, pod) in forward index, verify it exists in reverse index.
+	for volumeName, volume := range c.volumes {
+		for podKey := range volume.pods {
+			podVolumes, found := c.podToVolumes[podKey]
+			if !found {
+				t.Errorf("Forward index has volume %s -> pod %s, but pod not in reverse index", volumeName, podKey)
+				continue
+			}
+			if _, found := podVolumes[volumeName]; !found {
+				t.Errorf("Forward index has volume %s -> pod %s, but volume not in pod's volume list", volumeName, podKey)
+			}
+		}
+	}
 }
 
 // Delete all items in a bigger cache and check it's empty
@@ -69,6 +103,8 @@ func TestVolumeCache_DeleteAll(t *testing.T) {
 	t.Log("Before deleting all pods:")
 	c.dump(dumpLogger)
 
+	verifyReverseIndexConsistency(t, c)
+
 	// Act: delete all pods
 	for _, podKey := range podsToDelete {
 		c.DeletePod(logger, podKey)
@@ -79,6 +115,12 @@ func TestVolumeCache_DeleteAll(t *testing.T) {
 		t.Errorf("Expected cache to be empty, got %d volumes", len(c.volumes))
 		c.dump(dumpLogger)
 	}
+
+	// Assert: the reverse index is also empty
+	if len(c.podToVolumes) != 0 {
+		t.Errorf("Expected reverse index to be empty, got %d pods", len(c.podToVolumes))
+	}
+	verifyReverseIndexConsistency(t, c)
 }
 
 type podWithVolume struct {
@@ -345,7 +387,7 @@ func TestVolumeCache_AddVolumeSendConflicts(t *testing.T) {
 			expectedConflicts: []Conflict{},
 		},
 		{
-			name:        "existing volume in a new pod with existing policy and new incomparable label (missing categories)",
+			name:        "existing volume in a new pod with existing policy and new comparable label (missing categories)",
 			initialPods: existingPods,
 			podToAdd: podWithVolume{
 				podNamespace: "testns",
@@ -354,7 +396,16 @@ func TestVolumeCache_AddVolumeSendConflicts(t *testing.T) {
 				label:        "system_u:system_r:label7",
 				changePolicy: v1.SELinuxChangePolicyMountOption,
 			},
-			expectedConflicts: []Conflict{},
+			expectedConflicts: []Conflict{
+				{
+					PropertyName:       "SELinuxLabel",
+					EventReason:        "SELinuxLabelConflict",
+					Pod:                cache.ObjectName{Namespace: "testns", Name: "testpod"},
+					PropertyValue:      "system_u:system_r:label7",
+					OtherPod:           cache.ObjectName{Namespace: "ns7", Name: "pod7"},
+					OtherPropertyValue: "::label7:c0,c1",
+				},
+			},
 		},
 		{
 			name:        "existing volume in a new pod with existing policy and new incomparable label (missing everything)",
@@ -367,6 +418,27 @@ func TestVolumeCache_AddVolumeSendConflicts(t *testing.T) {
 				changePolicy: v1.SELinuxChangePolicyMountOption,
 			},
 			expectedConflicts: []Conflict{},
+		},
+		{
+			name:        "existing volume in a new pod with existing policy and new comparable label (missing everything but categories)",
+			initialPods: existingPods,
+			podToAdd: podWithVolume{
+				podNamespace: "testns",
+				podName:      "testpod",
+				volumeName:   "vol8",
+				label:        "system_u:system_r:label8:c0,c1",
+				changePolicy: v1.SELinuxChangePolicyMountOption,
+			},
+			expectedConflicts: []Conflict{
+				{
+					PropertyName:       "SELinuxLabel",
+					EventReason:        "SELinuxLabelConflict",
+					Pod:                cache.ObjectName{Namespace: "testns", Name: "testpod"},
+					PropertyValue:      "system_u:system_r:label8:c0,c1",
+					OtherPod:           cache.ObjectName{Namespace: "ns8", Name: "pod8"},
+					OtherPropertyValue: "",
+				},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -406,11 +478,15 @@ func TestVolumeCache_AddVolumeSendConflicts(t *testing.T) {
 			}
 			expectedPodInfo := podInfo{
 				seLinuxLabel: tt.podToAdd.label,
+				seLinuxParts: parse.ParseSELinuxLabel(tt.podToAdd.label),
 				changePolicy: tt.podToAdd.changePolicy,
 			}
 			if !reflect.DeepEqual(existingInfo, expectedPodInfo) {
 				t.Errorf("pod %s has unexpected info: %+v", podKey, existingInfo)
 			}
+
+			// Verify reverse index consistency
+			verifyReverseIndexConsistency(t, c)
 
 			// Act again: get the conflicts via SendConflicts
 			ch := make(chan Conflict)

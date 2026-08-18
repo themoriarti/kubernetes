@@ -139,7 +139,7 @@ var _ = SIGDescribe("Downward API", func() {
 		testDownwardAPI(ctx, f, podName, env, expectations)
 	})
 
-	ginkgo.It("should provide host IP and pod IP as an env var if pod uses host network [LinuxOnly]", func(ctx context.Context) {
+	f.It("should provide host IP and pod IP as an env var if pod uses host network [LinuxOnly]", f.WithNodeConformance(), func(ctx context.Context) {
 		podName := "downward-api-" + string(uuid.NewUUID())
 		env := []v1.EnvVar{
 			{
@@ -163,7 +163,7 @@ var _ = SIGDescribe("Downward API", func() {
 		}
 
 		expectations := []string{
-			fmt.Sprintf("OK"),
+			"OK",
 		}
 
 		pod := &v1.Pod{
@@ -458,6 +458,10 @@ var _ = SIGDescribe("Downward API", feature.PodLevelResources, framework.WithFea
 				},
 				Spec: v1.PodSpec{
 					Resources: &v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("250m"),
+							v1.ResourceMemory: resource.MustParse("32Mi"),
+						},
 						Limits: v1.ResourceList{
 							v1.ResourceCPU:    resource.MustParse("1250m"),
 							v1.ResourceMemory: resource.MustParse("64Mi"),
@@ -506,6 +510,10 @@ var _ = SIGDescribe("Downward API", feature.PodLevelResources, framework.WithFea
 				},
 				Spec: v1.PodSpec{
 					Resources: &v1.ResourceRequirements{
+						Requests: v1.ResourceList{
+							v1.ResourceCPU:    resource.MustParse("250m"),
+							v1.ResourceMemory: resource.MustParse("32Mi"),
+						},
 						Limits: v1.ResourceList{
 							v1.ResourceCPU: resource.MustParse("1250m"),
 						},

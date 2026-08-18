@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
@@ -38,7 +39,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), func() {
+var _ = SIGDescribe("FileKeyRef", feature.EnvFiles, framework.WithFeatureGate(features.EnvFiles), func() {
 	f := framework.NewDefaultFramework("filekeyref")
 	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
@@ -61,7 +62,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'CONFIG_1=value1' > /data/config.env && echo 'CONFIG_2=value2' >> /data/config.env"},
+						Command: []string{"sh", "-c", `echo CONFIG_1=\'value1\' > /data/config.env && echo CONFIG_2=\'value2\' >> /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -136,7 +137,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'CONFIG_1=value1' > /data/config.env && echo 'CONFIG_2=value2' >> /data/config.env && echo 'CONFIG_3=value3' >> /data/config.env"},
+						Command: []string{"sh", "-c", `echo CONFIG_1=\'value1\' > /data/config.env && echo CONFIG_2=\'value2\' >> /data/config.env && echo CONFIG_3=\'value3\' >> /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -239,7 +240,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'EXISTING_KEY=existing_value' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo EXISTING_KEY=\'existing_value\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -313,7 +314,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'HOOK_CONFIG=hook_value' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo HOOK_CONFIG=\'hook_value\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -394,7 +395,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'HOOK_CONFIG=hook_value' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo HOOK_CONFIG=\'hook_value\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -475,7 +476,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'CONFIG_1=value1' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo CONFIG_1=\'value1\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -545,7 +546,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'CONFIG_1=value1' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo CONFIG_1=\'value1\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -607,7 +608,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'EXISTING_KEY=value' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo EXISTING_KEY=\'value\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -679,7 +680,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:    "setup-envfile",
 						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-						Command: []string{"sh", "-c", "echo 'EXISTING_KEY=value' > /data/config.env"},
+						Command: []string{"sh", "-c", `echo EXISTING_KEY=\'value\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{
 							{
 								Name:      "config",
@@ -749,7 +750,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:         "setup-envfile",
 						Image:        imageutils.GetE2EImage(imageutils.BusyBox),
-						Command:      []string{"sh", "-c", "echo 'CONFIG_1=value1' > /data/config.env"},
+						Command:      []string{"sh", "-c", `echo CONFIG_1=\'value1\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{{Name: "config", MountPath: "/data"}},
 					},
 					{
@@ -807,7 +808,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 					{
 						Name:         "setup-envfile",
 						Image:        imageutils.GetE2EImage(imageutils.BusyBox),
-						Command:      []string{"sh", "-c", "echo 'CONFIG_INIT=fail' > /data/config.env"},
+						Command:      []string{"sh", "-c", `echo CONFIG_INIT=\'fail\' > /data/config.env`},
 						VolumeMounts: []v1.VolumeMount{{Name: "config", MountPath: "/data"}},
 					},
 					{
@@ -856,7 +857,7 @@ var _ = SIGDescribe("FileKeyRef", framework.WithFeatureGate(features.EnvFiles), 
 				InitContainers: []v1.Container{{
 					Name:         "setup-envfile",
 					Image:        imageutils.GetE2EImage(imageutils.BusyBox),
-					Command:      []string{"sh", "-c", "echo 'CONFIG_EPH=ephemeral' > /data/config.env"},
+					Command:      []string{"sh", "-c", `echo CONFIG_EPH=\'ephemeral\' > /data/config.env`},
 					VolumeMounts: []v1.VolumeMount{{Name: "config", MountPath: "/data"}},
 				}},
 				Containers: []v1.Container{{

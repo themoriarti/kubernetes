@@ -33,6 +33,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -52,6 +53,7 @@ import (
 	statustest "k8s.io/kubernetes/pkg/kubelet/status/testing"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util"
+	"k8s.io/utils/ptr"
 )
 
 type mutablePodManager interface {
@@ -180,8 +182,8 @@ func TestNewStatusPreservesPodStartTime(t *testing.T) {
 	syncer.SetPodStatus(logger, pod, getRandomPodStatus())
 
 	status := expectPodStatus(t, syncer, pod)
-	if !status.StartTime.Time.Equal(startTime.Time) {
-		t.Errorf("Unexpected start time, expected %v, actual %v", startTime, status.StartTime)
+	if !status.StartTime.Time.Equal(startTime.Rfc3339Copy().Time) {
+		t.Errorf("Unexpected start time, expected %v, actual %v", startTime.Rfc3339Copy(), status.StartTime)
 	}
 }
 
@@ -510,6 +512,32 @@ func TestStatusEquality(t *testing.T) {
 	normalizeStatus(&pod, &podStatus)
 	if !isPodStatusByKubeletEqual(&oldPodStatus, &podStatus) {
 		t.Fatalf("Differences in pod condition not owned by kubelet should not affect normalized equality.")
+	}
+
+	claimStatusA := v1.PodResourceClaimStatus{
+		Name:              "my-claim",
+		ResourceClaimName: ptr.To("claim"),
+	}
+	extendedClaimStatusA := &v1.PodExtendedResourceClaimStatus{
+		RequestMappings: []v1.ContainerExtendedResourceRequest{
+			{RequestName: "request", ContainerName: "c", ResourceName: "example.com/gpu"},
+		},
+		ResourceClaimName: "claim",
+	}
+	oldPodStatus.ResourceClaimStatuses = []v1.PodResourceClaimStatus{claimStatusA}
+	oldPodStatus.ExtendedResourceClaimStatus = extendedClaimStatusA
+	oldPodStatus.NodeAllocatableResourceClaimStatuses = []v1.NodeAllocatableResourceClaimStatus{
+		{
+			ResourceClaimName: "my-claim",
+			Containers:        []string{"ctr0"},
+			Resources:         map[v1.ResourceName]resource.Quantity{v1.ResourceMemory: resource.MustParse("100Mi")},
+		},
+	}
+
+	normalizeStatus(&pod, &oldPodStatus)
+	normalizeStatus(&pod, &podStatus)
+	if !isPodStatusByKubeletEqual(&oldPodStatus, &podStatus) {
+		t.Fatalf("Differences in pod resource claim statuses not owned by kubelet should not affect normalized equality.")
 	}
 }
 
@@ -2073,14 +2101,108 @@ func TestMergePodStatus(t *testing.T) {
 	}
 }
 
+func TestContainerTerminationMetric(t *testing.T) {
+	metrics.Register()
+	manager := newTestManager(&fake.Clientset{})
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "metric-pod",
+			Namespace: "test",
+			UID:       "12345",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{Name: "test-container"},
+			},
+		},
+	}
+	manager.podManager.(mutablePodManager).AddPod(pod)
+
+	metrics.TerminatedContainersTotal.Reset()
+
+	initialStatus := v1.PodStatus{
+		Phase: v1.PodRunning,
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name: "test-container",
+				State: v1.ContainerState{
+					Running: &v1.ContainerStateRunning{},
+				},
+			},
+		},
+	}
+	manager.SetPodStatus(klog.Background(), pod, initialStatus)
+
+	manager.testSyncBatch(context.Background())
+
+	// Test successful termination (exit code 0)
+	successStatus := v1.PodStatus{
+		Phase: v1.PodSucceeded,
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name: "test-container",
+				State: v1.ContainerState{
+					Terminated: &v1.ContainerStateTerminated{
+						ExitCode: 0,
+						Reason:   "Completed",
+					},
+				},
+			},
+		},
+	}
+	manager.SetPodStatus(klog.Background(), pod, successStatus)
+	manager.testSyncBatch(context.Background())
+
+	count, err := testutil.GetCounterMetricValue(metrics.TerminatedContainersTotal.WithLabelValues(metrics.Container, "0", "Completed"))
+	require.NoError(t, err)
+	assert.InDelta(t, 1.0, count, 0)
+
+	// Test error termination (exit code 1) for a second container to verify cumulative behavior
+	errorPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "error-pod",
+			Namespace: "test",
+			UID:       "67890",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{Name: "error-container"},
+			},
+		},
+	}
+	manager.podManager.(mutablePodManager).AddPod(errorPod)
+
+	errorStatus := v1.PodStatus{
+		Phase: v1.PodFailed,
+		ContainerStatuses: []v1.ContainerStatus{
+			{
+				Name: "error-container",
+				State: v1.ContainerState{
+					Terminated: &v1.ContainerStateTerminated{
+						ExitCode: 1,
+						Reason:   "Error",
+					},
+				},
+			},
+		},
+	}
+	manager.SetPodStatus(klog.Background(), errorPod, errorStatus)
+	manager.testSyncBatch(context.Background())
+
+	count, err = testutil.GetCounterMetricValue(metrics.TerminatedContainersTotal.WithLabelValues(metrics.Container, "1", "Error"))
+	require.NoError(t, err)
+	assert.InDelta(t, 1.0, count, 0)
+}
+
 func TestPodResizeConditions(t *testing.T) {
 	m := NewManager(&fake.Clientset{}, kubepod.NewBasicPodManager(), &statustest.FakePodDeletionSafetyProvider{}, util.NewPodStartupLatencyTracker())
 	podUID := types.UID("12345")
 
 	testCases := []struct {
 		name                          string
-		updateFunc                    func(types.UID)
+		updateFunc                    func(types.UID) bool
 		expected                      []*v1.PodCondition
+		expectedUpdateFuncReturnVal   bool
 		expectedIsPodResizeDeferred   bool
 		expectedIsPodResizeInfeasible bool
 	}{
@@ -2091,9 +2213,11 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "set pod resize in progress condition with reason and message",
-			updateFunc: func(podUID types.UID) {
-				m.SetPodResizeInProgressCondition(podUID, "some-reason", "some-message", 1)
+			updateFunc: func(podUID types.UID) bool {
+				_, b := m.SetPodResizeInProgressCondition(podUID, "some-reason", "some-message", 1)
+				return b
 			},
+			expectedUpdateFuncReturnVal: true,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizeInProgress,
@@ -2106,9 +2230,11 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "set pod resize in progress condition without reason and message",
-			updateFunc: func(podUID types.UID) {
-				m.SetPodResizeInProgressCondition(podUID, "", "", 1)
+			updateFunc: func(podUID types.UID) bool {
+				_, b := m.SetPodResizeInProgressCondition(podUID, "", "", 1)
+				return b
 			},
+			expectedUpdateFuncReturnVal: false,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizeInProgress,
@@ -2121,9 +2247,11 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "attempt to overwrite pod resize in progress condition with a new observedGeneration",
-			updateFunc: func(podUID types.UID) {
-				m.SetPodResizeInProgressCondition(podUID, "", "", 2)
+			updateFunc: func(podUID types.UID) bool {
+				_, b := m.SetPodResizeInProgressCondition(podUID, "", "", 2)
+				return b
 			},
+			expectedUpdateFuncReturnVal: false,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizeInProgress,
@@ -2136,11 +2264,13 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "clear the pod resize in progress condition and set a new one",
-			updateFunc: func(podUID types.UID) {
+			updateFunc: func(podUID types.UID) bool {
 				m.ClearPodResizeInProgressCondition(podUID)
 				// Set a new condition with a different observedGeneration
-				m.SetPodResizeInProgressCondition(podUID, "", "", 2)
+				_, b := m.SetPodResizeInProgressCondition(podUID, "", "", 2)
+				return b
 			},
+			expectedUpdateFuncReturnVal: true,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizeInProgress,
@@ -2151,9 +2281,10 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "set pod resize pending condition to deferred with message",
-			updateFunc: func(podUID types.UID) {
-				m.SetPodResizePendingCondition(podUID, v1.PodReasonDeferred, "some-message", 1)
+			updateFunc: func(podUID types.UID) bool {
+				return m.SetPodResizePendingCondition(podUID, "some-reason", "some-message", 1)
 			},
+			expectedUpdateFuncReturnVal: true,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizePending,
@@ -2171,10 +2302,33 @@ func TestPodResizeConditions(t *testing.T) {
 			expectedIsPodResizeDeferred: true,
 		},
 		{
-			name: "set pod resize pending condition to infeasible with message",
-			updateFunc: func(podUID types.UID) {
-				m.SetPodResizePendingCondition(podUID, v1.PodReasonInfeasible, "some-message", 3)
+			name: "change the deferred message",
+			updateFunc: func(podUID types.UID) bool {
+				return m.SetPodResizePendingCondition(podUID, v1.PodReasonDeferred, "some-other-message", 1)
 			},
+			expectedUpdateFuncReturnVal: false,
+			expected: []*v1.PodCondition{
+				{
+					Type:               v1.PodResizePending,
+					Status:             v1.ConditionTrue,
+					Reason:             v1.PodReasonDeferred,
+					Message:            "some-other-message",
+					ObservedGeneration: 1,
+				},
+				{
+					Type:               v1.PodResizeInProgress,
+					Status:             v1.ConditionTrue,
+					ObservedGeneration: 2,
+				},
+			},
+			expectedIsPodResizeDeferred: true,
+		},
+		{
+			name: "set pod resize pending condition to infeasible with message",
+			updateFunc: func(podUID types.UID) bool {
+				return m.SetPodResizePendingCondition(podUID, v1.PodReasonInfeasible, "some-message", 3)
+			},
+			expectedUpdateFuncReturnVal: true,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizePending,
@@ -2193,9 +2347,11 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "clear pod resize in progress condition",
-			updateFunc: func(podUID types.UID) {
-				m.ClearPodResizeInProgressCondition(podUID)
+			updateFunc: func(podUID types.UID) bool {
+				_, b := m.ClearPodResizeInProgressCondition(podUID)
+				return b
 			},
+			expectedUpdateFuncReturnVal: true,
 			expected: []*v1.PodCondition{
 				{
 					Type:               v1.PodResizePending,
@@ -2209,8 +2365,9 @@ func TestPodResizeConditions(t *testing.T) {
 		},
 		{
 			name: "clear pod resize pending condition",
-			updateFunc: func(podUID types.UID) {
+			updateFunc: func(podUID types.UID) bool {
 				m.ClearPodResizePendingCondition(podUID)
+				return false
 			},
 			expected: nil,
 		},
@@ -2219,7 +2376,7 @@ func TestPodResizeConditions(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.updateFunc != nil {
-				tc.updateFunc(podUID)
+				require.Equal(t, tc.expectedUpdateFuncReturnVal, tc.updateFunc(podUID))
 			}
 			resizeConditions := m.GetPodResizeConditions(podUID)
 			if tc.expected == nil {
@@ -2246,28 +2403,34 @@ func TestClearPodResizeInProgressCondition(t *testing.T) {
 		name               string
 		existingConditions podResizeConditions
 		expectedConditions []*v1.PodCondition
-		expected           bool
+		expectedGeneration int64
+		expectedBool       bool
 	}{
 		{
-			name:     "no existing conditions",
-			expected: false,
+			name:               "no existing conditions",
+			expectedGeneration: 0,
+			expectedBool:       false,
 		},
 		{
 			name: "existing pod resize in progress condition",
 			existingConditions: podResizeConditions{
 				PodResizeInProgress: &v1.PodCondition{
-					Type:   v1.PodResizeInProgress,
-					Status: v1.ConditionTrue,
+					Type:               v1.PodResizeInProgress,
+					Status:             v1.ConditionTrue,
+					ObservedGeneration: 1,
 				},
 			},
-			expected: true,
+			expectedGeneration: 1,
+			expectedBool:       true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m.(*manager).podResizeConditions[podUID] = tc.existingConditions
-			assert.Equal(t, tc.expected, m.ClearPodResizeInProgressCondition(podUID))
+			gen, b := m.ClearPodResizeInProgressCondition(podUID)
+			assert.Equal(t, tc.expectedGeneration, gen)
+			assert.Equal(t, tc.expectedBool, b)
 			resizeConditions := m.GetPodResizeConditions(podUID)
 			if tc.expectedConditions == nil {
 				require.Nil(t, resizeConditions)

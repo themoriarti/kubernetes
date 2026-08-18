@@ -924,6 +924,8 @@ spec:
       schedulerName: schedulerNameValue
       schedulingGates:
       - name: nameValue
+      schedulingGroup:
+        podGroupName: podGroupNameValue
       securityContext:
         appArmorProfile:
           localhostProfile: localhostProfileValue
@@ -1216,6 +1218,8 @@ spec:
               keyType: keyTypeValue
               maxExpirationSeconds: 3
               signerName: signerNameValue
+              userAnnotations:
+                userAnnotationsKey: userAnnotationsValue
             secret:
               items:
               - key: keyValue

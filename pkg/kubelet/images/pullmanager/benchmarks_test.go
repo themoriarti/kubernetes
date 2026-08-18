@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/util/rand"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 type namedAccessor struct {
@@ -72,9 +73,12 @@ func directRecordReadFunc(expectHit bool) benchmarkedCheckFunc {
 
 func mustAttemptPullReadFunc(expectHit bool) benchmarkedCheckFunc {
 	return func(b *testing.B, pullManager PullManager, imgRef string) {
-		mustPull := pullManager.MustAttemptImagePull("test.repo/org/"+imgRef, imgRef, nil, nil)
-		if mustPull != !expectHit {
-			b.Fatalf("MustAttemptImagePull() expected %t, got %t", !expectHit, mustPull)
+		tCtx := ktesting.Init(b)
+		mustPull, err := pullManager.MustAttemptImagePull(tCtx, "test.repo/org/"+imgRef, imgRef, func() ([]kubeletconfig.ImagePullSecret, *kubeletconfig.ImagePullServiceAccount, error) {
+			return nil, nil, nil
+		})
+		if mustPull != !expectHit || err != nil {
+			b.Fatalf("no error expected (got %v); MustAttemptImagePull() expected %t, got %t", err, !expectHit, mustPull)
 		}
 	}
 }
@@ -84,8 +88,9 @@ func mustAttemptPullReadFunc(expectHit bool) benchmarkedCheckFunc {
 // We cannot do direct writes though because FSAccessor is not thread-safe and
 // would cause errors when the tests run in parallel.
 func BenchmarkPullManagerWriteImagePullIntent(b *testing.B) {
+	logger, _ := ktesting.NewTestContext(b)
 	benchmarkAllPullAccessorsWrite(b, func(b *testing.B, pullManager PullManager, imgRef string) {
-		if err := pullManager.RecordPullIntent("test.repo/org/" + imgRef); err != nil {
+		if err := pullManager.RecordPullIntent(logger, "test.repo/org/"+imgRef); err != nil {
 			b.Fatalf("failed to write a record: %v", err)
 		}
 	})
@@ -93,7 +98,9 @@ func BenchmarkPullManagerWriteImagePullIntent(b *testing.B) {
 
 func BenchmarkPullManagerWriteIfNotChanged(b *testing.B) {
 	benchmarkAllPullAccessorsWrite(b, func(b *testing.B, pullManager PullManager, imgRef string) {
+		tCtx := ktesting.Init(b)
 		if err := pullManager.writePulledRecordIfChanged(
+			tCtx,
 			"test.repo/org/"+imgRef,
 			imgRef,
 			&kubeletconfig.ImagePullCredentials{NodePodsAccessible: true},
@@ -204,6 +211,7 @@ const (
 )
 
 func benchmarkPullAccessorCacheRead(b *testing.B, bc recordAccessorBenchmark, benchmarkedCheck benchmarkedCheckFunc) {
+	logger, _ := ktesting.NewTestContext(b)
 	b.Run(fmt.Sprintf("Type=%s/RecordsStored=%d/ConcurrencyPerCPU=%d", bc.namedInit.name, bc.recordsInCache, bc.concurrencyMultiplier), func(b *testing.B) {
 		genRecords, genRequests := generateRecordsAndRequests(bc.recordsInCache, bc.cacheHit)
 
@@ -212,7 +220,7 @@ func benchmarkPullAccessorCacheRead(b *testing.B, bc recordAccessorBenchmark, be
 		// tempdir cleanup to always trigger before the next benchmark is run
 		accessor := bc.namedInit.accessorInit(b)
 		for _, r := range genRecords {
-			if err := accessor.WriteImagePulledRecord(r); err != nil {
+			if err := accessor.WriteImagePulledRecord(logger, r); err != nil {
 				b.Fatalf("failed to prepare cache - write error: %v", err)
 			}
 		}
@@ -285,9 +293,10 @@ func generateRecordsAndRequests(recordsNum int, generateHits bool) ([]*kubeletco
 
 func setupFSRecordsAccessor(t testing.TB) PullRecordsAccessor {
 	t.Helper()
+	logger, _ := ktesting.NewTestContext(t)
 
 	tempDir := t.TempDir()
-	accessor, err := NewFSPullRecordsAccessor(tempDir)
+	accessor, err := NewFSPullRecordsAccessor(logger, tempDir)
 	if err != nil {
 		t.Fatalf("failed to setup filesystem pull records accessor: %v", err)
 	}
@@ -295,12 +304,21 @@ func setupFSRecordsAccessor(t testing.TB) PullRecordsAccessor {
 }
 
 func setupInMemRecordsAccessor(t testing.TB, cacheSize int, authoritative bool) PullRecordsAccessor {
+	logger, _ := ktesting.NewTestContext(t)
 	t.Helper()
 
 	fsAccessor := setupFSRecordsAccessor(t)
-	memcacheAccessor := NewCachedPullRecordsAccessor(fsAccessor, int32(cacheSize), int32(cacheSize), int32(runtime.NumCPU()))
-	memcacheAccessor.intents.authoritative.Store(authoritative)
-	memcacheAccessor.pulledRecords.authoritative.Store(authoritative)
+	memcacheAccessor := NewCachedPullRecordsAccessor(logger, fsAccessor, int32(cacheSize), int32(cacheSize), int32(runtime.NumCPU()))
+	gotMeteredAccessor, ok := memcacheAccessor.(*meteringRecordsAccessor)
+	if !ok {
+		t.Fatalf("the tested accessor must be a metered records accessor, got %T", memcacheAccessor)
+	}
+	inMemAccessor, ok := gotMeteredAccessor.sizeExposedPullRecordsAccessor.(*cachedPullRecordsAccessor)
+	if !ok {
+		t.Fatalf("the metered accessor's delegate is not an inMemAccesor: %T", gotMeteredAccessor.sizeExposedPullRecordsAccessor)
+	}
+	inMemAccessor.intents.authoritative.Store(authoritative)
+	inMemAccessor.pulledRecords.authoritative.Store(authoritative)
 
 	return memcacheAccessor
 }

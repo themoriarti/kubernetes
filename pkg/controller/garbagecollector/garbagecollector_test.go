@@ -18,6 +18,7 @@ package garbagecollector
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -253,6 +254,126 @@ func serilizeOrDie(t *testing.T, object interface{}) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestAttemptToDeleteItemDeleteObjectNotFound(t *testing.T) {
+	pod := getPod("ExternallyDeletedPod", []metav1.OwnerReference{
+		{
+			Kind:       "ReplicationController",
+			Name:       "owner1",
+			UID:        "123",
+			APIVersion: "v1",
+		},
+	})
+	testHandler := &fakeActionHandler{
+		response: map[string]FakeResponse{
+			"GET" + "/api/v1/namespaces/ns1/replicationcontrollers/owner1": {
+				404,
+				[]byte{},
+			},
+			"GET" + "/api/v1/namespaces/ns1/pods/ExternallyDeletedPod": {
+				200,
+				serilizeOrDie(t, pod),
+			},
+			"DELETE" + "/api/v1/namespaces/ns1/pods/ExternallyDeletedPod": {
+				404,
+				[]byte{},
+			},
+		},
+	}
+	srv, clientConfig := testServerAndClientConfig(testHandler.ServeHTTP)
+	defer srv.Close()
+
+	gc := setupGC(t, clientConfig)
+	defer close(gc.stop)
+
+	item := &node{
+		identity: objectReference{
+			OwnerReference: metav1.OwnerReference{
+				Kind:       pod.Kind,
+				APIVersion: pod.APIVersion,
+				Name:       pod.Name,
+				UID:        pod.UID,
+			},
+			Namespace: pod.Namespace,
+		},
+		owners: nil,
+	}
+
+	err := gc.attemptToDeleteItem(context.TODO(), item)
+	if !goerrors.Is(err, enqueuedVirtualDeleteEventErr) {
+		t.Errorf("expected enqueuedVirtualDeleteEventErr, got: %v", err)
+	}
+	if gc.dependencyGraphBuilder.graphChanges.Len() == 0 {
+		t.Errorf("expected a virtual delete event to be enqueued in graphChanges, but the queue is empty")
+	}
+}
+
+func TestAttemptToDeleteItemDeleteObjectNotFoundWaitingForDependents(t *testing.T) {
+	pod := getPod("ExternallyDeletedPodFG", []metav1.OwnerReference{
+		{
+			Kind:               "ReplicationController",
+			Name:               "owner1",
+			UID:                "123",
+			APIVersion:         "v1",
+			BlockOwnerDeletion: func() *bool { b := true; return &b }(),
+		},
+	})
+	owner := &v1.ReplicationController{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ReplicationController",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "owner1",
+			Namespace:         "ns1",
+			UID:               "123",
+			DeletionTimestamp: func() *metav1.Time { t := metav1.Now(); return &t }(),
+			Finalizers:        []string{metav1.FinalizerDeleteDependents},
+		},
+	}
+	testHandler := &fakeActionHandler{
+		response: map[string]FakeResponse{
+			"GET" + "/api/v1/namespaces/ns1/replicationcontrollers/owner1": {
+				200,
+				serilizeOrDie(t, owner),
+			},
+			"GET" + "/api/v1/namespaces/ns1/pods/ExternallyDeletedPodFG": {
+				200,
+				serilizeOrDie(t, pod),
+			},
+			"DELETE" + "/api/v1/namespaces/ns1/pods/ExternallyDeletedPodFG": {
+				404,
+				[]byte{},
+			},
+		},
+	}
+	srv, clientConfig := testServerAndClientConfig(testHandler.ServeHTTP)
+	defer srv.Close()
+
+	gc := setupGC(t, clientConfig)
+	defer close(gc.stop)
+
+	item := &node{
+		identity: objectReference{
+			OwnerReference: metav1.OwnerReference{
+				Kind:       pod.Kind,
+				APIVersion: pod.APIVersion,
+				Name:       pod.Name,
+				UID:        pod.UID,
+			},
+			Namespace: pod.Namespace,
+		},
+		owners: nil,
+	}
+
+	err := gc.attemptToDeleteItem(context.TODO(), item)
+	if !goerrors.Is(err, enqueuedVirtualDeleteEventErr) {
+		t.Errorf("expected enqueuedVirtualDeleteEventErr, got: %v", err)
+	}
+	if gc.dependencyGraphBuilder.graphChanges.Len() == 0 {
+		t.Errorf("expected a virtual delete event to be enqueued in graphChanges, but the queue is empty")
+	}
 }
 
 // test the attemptToDeleteItem function making the expected actions.
@@ -818,6 +939,14 @@ func TestGetDeletableResources(t *testing.T) {
 	}
 }
 
+type wrappedKubeClientWithUnsupportedWatchListSemantics struct {
+	kubernetes.Interface
+}
+
+func (c *wrappedKubeClientWithUnsupportedWatchListSemantics) IsWatchListSemanticsUnSupported() bool {
+	return true
+}
+
 // TestGarbageCollectorSync ensures that a discovery client error
 // or an informer sync error will not cause the garbage collector
 // to block infinitely.
@@ -889,10 +1018,12 @@ func TestGarbageCollectorSync(t *testing.T) {
 	srv, clientConfig := testServerAndClientConfig(alternativeTestHandler)
 	defer srv.Close()
 	clientConfig.ContentConfig.NegotiatedSerializer = nil
-	client, err := kubernetes.NewForConfig(clientConfig)
+	kubeClient, err := kubernetes.NewForConfig(clientConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// TODO(#115478): migrate this test to use fakeClient instead of the real client.
+	client := &wrappedKubeClientWithUnsupportedWatchListSemantics{kubeClient}
 
 	tweakableRM := meta.NewDefaultRESTMapper(nil)
 	tweakableRM.AddSpecific(schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, schema.GroupVersionResource{Version: "v1", Resource: "pods"}, schema.GroupVersionResource{Version: "v1", Resource: "pod"}, meta.RESTScopeNamespace)
@@ -906,17 +1037,25 @@ func TestGarbageCollectorSync(t *testing.T) {
 
 	sharedInformers := informers.NewSharedInformerFactory(client, 0)
 
-	logger, tCtx := ktesting.NewTestContext(t)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	tCtx := ktesting.Init(t)
 	defer tCtx.Cancel("test has completed")
+	logger := tCtx.Logger()
+
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
+
 	gc, err := NewGarbageCollector(tCtx, client, metadataClient, rm, map[schema.GroupResource]struct{}{}, sharedInformers, alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	syncPeriod := 200 * time.Millisecond
-	go gc.Run(tCtx, 1, syncPeriod)
+	wg.Go(func() {
+		gc.Run(tCtx, 1, syncPeriod)
+	})
 	// The pseudo-code of GarbageCollector.Sync():
 	// GarbageCollector.Sync(client, period, stopCh):
 	//    wait.Until() loops with `period` until the `stopCh` is closed :
@@ -931,7 +1070,9 @@ func TestGarbageCollectorSync(t *testing.T) {
 	// The 1s sleep in the test allows GetDeletableResources and
 	// gc.resyncMonitors to run ~5 times to ensure the changes to the
 	// fakeDiscoveryClient are picked up.
-	go gc.Sync(tCtx, fakeDiscoveryClient, syncPeriod)
+	wg.Go(func() {
+		gc.Sync(tCtx, fakeDiscoveryClient, syncPeriod)
+	})
 
 	// Wait until the sync discovers the initial resources
 	time.Sleep(1 * time.Second)

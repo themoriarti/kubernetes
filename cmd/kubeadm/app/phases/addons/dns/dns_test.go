@@ -1454,7 +1454,7 @@ func TestDeployedDNSAddon(t *testing.T) {
 		},
 		{
 			name:           "with digest",
-			image:          "registry.k8s.io/coredns/coredns:v1.12.1@sha256:a0ead06651cf580044aeb0a0feba63591858fb2e43ade8c9dea45a6a89ae7e5e",
+			image:          fmt.Sprintf("registry.k8s.io/coredns/coredns:%s@sha256:1391544c978029fcddc65068f6ad67f396e55585b664ecccd7fefba029b9b706", kubeadmconstants.CoreDNSVersion),
 			deploymentSize: 1,
 			wantVersion:    kubeadmconstants.CoreDNSVersion,
 		},
@@ -1679,7 +1679,7 @@ func newMockClientForTest(t *testing.T, replicas int32, deploymentSize int, imag
 		image = "registry.k8s.io/coredns/coredns:" + kubeadmconstants.CoreDNSVersion
 	}
 	client := clientsetfake.NewSimpleClientset()
-	for i := 0; i < deploymentSize; i++ {
+	for i := range deploymentSize {
 		_, err := client.AppsV1().Deployments(metav1.NamespaceSystem).Create(context.TODO(), &apps.Deployment{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Deployment",

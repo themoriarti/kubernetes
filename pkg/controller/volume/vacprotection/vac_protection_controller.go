@@ -19,6 +19,7 @@ package vacprotection
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -35,7 +36,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/controller/volume/protectionutil"
+	"k8s.io/kubernetes/pkg/controller/util/protectionutil"
 	"k8s.io/kubernetes/pkg/util/slice"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/utils/ptr"
@@ -200,20 +201,26 @@ func NewVACProtectionController(logger klog.Logger,
 // Run runs the controller goroutines.
 func (c *Controller) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting VAC protection controller")
-	defer logger.Info("Shutting down VAC protection controller")
 
-	if !cache.WaitForNamedCacheSync("VAC protection", ctx.Done(), c.pvSynced, c.pvcSynced, c.vacSynced) {
+	var wg sync.WaitGroup
+	defer func() {
+		logger.Info("Shutting down VAC protection controller")
+		c.queue.ShutDown()
+		wg.Wait()
+	}()
+
+	if !cache.WaitForNamedCacheSyncWithContext(ctx, c.pvSynced, c.pvcSynced, c.vacSynced) {
 		return
 	}
 
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		})
 	}
-
 	<-ctx.Done()
 }
 

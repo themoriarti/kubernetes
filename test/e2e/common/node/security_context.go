@@ -27,12 +27,8 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/events"
-	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -91,7 +87,7 @@ var _ = SIGDescribe("Security Context", func() {
 			}
 		}
 
-		f.It("must create the user namespace if set to false [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("must create the user namespace if set to false [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			// with hostUsers=false the pod must use a new user namespace
 			podClient := e2epod.PodClientNS(f, f.Namespace.Name)
 
@@ -129,7 +125,7 @@ var _ = SIGDescribe("Security Context", func() {
 			}
 		})
 
-		f.It("must create the user namespace in the configured hostUID/hostGID range [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("must create the user namespace in the configured hostUID/hostGID range [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			// We need to check with the binary "getsubuids" the mappings for the kubelet.
 			// If something is not present, we skip the test as the node wasn't configured to run this test.
 			id, length, err := kubeletUsernsMappings(getsubuidsBinary)
@@ -137,7 +133,7 @@ var _ = SIGDescribe("Security Context", func() {
 				e2eskipper.Skipf("node is not setup for userns with kubelet mappings: %v", err)
 			}
 
-			for i := 0; i < 4; i++ {
+			for range 4 {
 				// makePod(false) creates the pod with user namespace
 				podClient := e2epod.PodClientNS(f, f.Namespace.Name)
 				createdPod := podClient.Create(ctx, makePod(false))
@@ -197,7 +193,7 @@ var _ = SIGDescribe("Security Context", func() {
 			}
 		})
 
-		f.It("must not create the user namespace if set to true [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("must not create the user namespace if set to true [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			// with hostUsers=true the pod must use the host user namespace
 			pod := makePod(true)
 			// When running in the host's user namespace, the /proc/self/uid_map file content looks like:
@@ -208,7 +204,7 @@ var _ = SIGDescribe("Security Context", func() {
 			})
 		})
 
-		f.It("should mount all volumes with proper permissions with hostUsers=false [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("should mount all volumes with proper permissions with hostUsers=false [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			// Create configmap.
 			name := "userns-volumes-test-" + string(uuid.NewUUID())
 			configMap := newConfigMap(f, name)
@@ -330,7 +326,7 @@ var _ = SIGDescribe("Security Context", func() {
 			})
 		})
 
-		f.It("should set FSGroup to user inside the container with hostUsers=false [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("should set FSGroup to user inside the container with hostUsers=false [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			// Create configmap.
 			name := "userns-volumes-test-" + string(uuid.NewUUID())
 			configMap := newConfigMap(f, name)
@@ -389,7 +385,7 @@ var _ = SIGDescribe("Security Context", func() {
 				strings.Repeat(fmt.Sprintf("=%v\n", fsGroup), len(configMap.Data)),
 			})
 		})
-		f.It("metrics should report count of started and failed user namespaced pods [LinuxOnly]", feature.UserNamespacesSupport, framework.WithFeatureGate(features.UserNamespacesSupport), func(ctx context.Context) {
+		f.It("metrics should report count of started and failed user namespaced pods [LinuxOnly]", feature.UserNamespacesSupport, func(ctx context.Context) {
 			targetNode, err := findLinuxNode(ctx, f)
 			framework.ExpectNoError(err, "Error finding Linux node")
 			framework.Logf("Using node: %v", targetNode.Name)
@@ -477,7 +473,7 @@ var _ = SIGDescribe("Security Context", func() {
 		})
 	})
 
-	ginkgo.Context("When creating a container with runAsNonRoot", func() {
+	f.Context("When creating a container with runAsNonRoot", f.WithNodeConformance(), func() {
 		rootImage := imageutils.GetE2EImage(imageutils.BusyBox)
 		nonRootImage := imageutils.GetE2EImage(imageutils.NonRoot)
 		makeNonRootPod := func(podName, image string, userid *int64) *v1.Pod {
@@ -749,7 +745,7 @@ var _ = SIGDescribe("Security Context", func() {
 		})
 	})
 
-	f.Context("SupplementalGroupsPolicy [LinuxOnly]", feature.SupplementalGroupsPolicy, framework.WithFeatureGate(features.SupplementalGroupsPolicy), func() {
+	f.Context("SupplementalGroupsPolicy [LinuxOnly]", feature.SupplementalGroupsPolicy, func() {
 		timeout := 1 * time.Minute
 
 		agnhostImage := imageutils.GetE2EImage(imageutils.Agnhost)
@@ -791,19 +787,6 @@ var _ = SIGDescribe("Security Context", func() {
 					RestartPolicy: v1.RestartPolicyNever,
 				},
 			}
-		}
-
-		nodeSupportsSupplementalGroupsPolicy := func(ctx context.Context, f *framework.Framework, nodeName string) bool {
-			node, err := f.ClientSet.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-			framework.ExpectNoError(err)
-			gomega.Expect(node).NotTo(gomega.BeNil())
-			if node.Status.Features != nil {
-				supportsSupplementalGroupsPolicy := node.Status.Features.SupplementalGroupsPolicy
-				if supportsSupplementalGroupsPolicy != nil && *supportsSupplementalGroupsPolicy {
-					return true
-				}
-			}
-			return false
 		}
 		waitForContainerUser := func(ctx context.Context, f *framework.Framework, podName string, containerName string, expectedContainerUser *v1.ContainerUser) error {
 			return framework.Gomega().Eventually(ctx,
@@ -866,28 +849,6 @@ var _ = SIGDescribe("Security Context", func() {
 			stdout := e2epod.ExecCommandInContainer(f, podName, containerName, "id", "-G")
 			gomega.Expect(stdout).To(gomega.Equal(expectedOutput))
 		}
-		expectRejectionEventIssued := func(ctx context.Context, f *framework.Framework, pod *v1.Pod) {
-			framework.ExpectNoError(
-				framework.Gomega().Eventually(ctx,
-					framework.HandleRetry(framework.ListObjects(
-						f.ClientSet.CoreV1().Events(pod.Namespace).List,
-						metav1.ListOptions{
-							FieldSelector: fields.Set{
-								"type":                      core.EventTypeWarning,
-								"reason":                    lifecycle.SupplementalGroupsPolicyNotSupported,
-								"involvedObject.kind":       "Pod",
-								"involvedObject.apiVersion": v1.SchemeGroupVersion.String(),
-								"involvedObject.name":       pod.Name,
-								"involvedObject.uid":        string(pod.UID),
-							}.AsSelector().String(),
-						},
-					))).
-					WithTimeout(timeout).
-					Should(gcustom.MakeMatcher(func(eventList *v1.EventList) (bool, error) {
-						return len(eventList.Items) == 1, nil
-					})),
-			)
-		}
 
 		ginkgo.When("SupplementalGroupsPolicy nil in SecurityContext", func() {
 			ginkgo.When("if the container's primary UID belongs to some groups in the image", func() {
@@ -897,27 +858,8 @@ var _ = SIGDescribe("Security Context", func() {
 						pod = e2epod.NewPodClient(f).CreateSync(ctx, mkPod(ptr.To(v1.SupplementalGroupsPolicyMerge)))
 					})
 				})
-				ginkgo.When("scheduled node does not support SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does not support SupplementalGroupsPolicy
-						if nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does support SupplementalGroupsPolicy")
-						}
-					})
-					ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
-						expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, false)
-					})
-				})
-				ginkgo.When("scheduled node supports SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does support SupplementalGroupsPolicy
-						if !nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does not support SupplementalGroupsPolicy")
-						}
-					})
-					ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
-						expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
-					})
+				ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
+					expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
 				})
 			})
 		})
@@ -929,27 +871,8 @@ var _ = SIGDescribe("Security Context", func() {
 						pod = e2epod.NewPodClient(f).CreateSync(ctx, mkPod(nil))
 					})
 				})
-				ginkgo.When("scheduled node does not support SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does not support SupplementalGroupsPolicy
-						if nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does support SupplementalGroupsPolicy")
-						}
-					})
-					ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
-						expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, false)
-					})
-				})
-				ginkgo.When("scheduled node supports SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does support SupplementalGroupsPolicy
-						if !nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does not support SupplementalGroupsPolicy")
-						}
-					})
-					ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
-						expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
-					})
+				ginkgo.It("it should add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
+					expectMergePolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
 				})
 			})
 		})
@@ -958,42 +881,18 @@ var _ = SIGDescribe("Security Context", func() {
 				var pod *v1.Pod
 				ginkgo.BeforeEach(func(ctx context.Context) {
 					ginkgo.By("creating a pod", func() {
-						pod = e2epod.NewPodClient(f).Create(ctx, mkPod(ptr.To(v1.SupplementalGroupsPolicyStrict)))
-						framework.ExpectNoError(e2epod.WaitForPodScheduled(ctx, f.ClientSet, pod.Namespace, pod.Name))
-						var err error
-						pod, err = e2epod.NewPodClient(f).Get(ctx, pod.Name, metav1.GetOptions{})
-						framework.ExpectNoError(err)
+						pod = e2epod.NewPodClient(f).CreateSync(ctx, mkPod(ptr.To(v1.SupplementalGroupsPolicyStrict)))
 					})
 				})
-				ginkgo.When("scheduled node does not support SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does not support SupplementalGroupsPolicy
-						if nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does support SupplementalGroupsPolicy")
-						}
-					})
-					ginkgo.It("it should reject the pod [LinuxOnly]", func(ctx context.Context) {
-						expectRejectionEventIssued(ctx, f, pod)
-					})
-				})
-				ginkgo.When("scheduled node supports SupplementalGroupsPolicy", func() {
-					ginkgo.BeforeEach(func(ctx context.Context) {
-						// ensure the scheduled node does support SupplementalGroupsPolicy
-						if !nodeSupportsSupplementalGroupsPolicy(ctx, f, pod.Spec.NodeName) {
-							e2eskipper.Skipf("scheduled node does not support SupplementalGroupsPolicy")
-						}
-						framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod))
-					})
-					ginkgo.It("it should NOT add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
-						expectStrictPolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
-					})
+				ginkgo.It("it should NOT add SupplementalGroups to them [LinuxOnly]", func(ctx context.Context) {
+					expectStrictPolicyInEffect(ctx, f, pod.Name, pod.Spec.Containers[0].Name, true)
 				})
 			})
 		})
 	})
 })
 
-var _ = SIGDescribe("User Namespaces for Pod Security Standards [LinuxOnly]", func() {
+var _ = SIGDescribe("User Namespaces for Restricted Pod Security Standards [LinuxOnly]", func() {
 	ginkgo.BeforeEach(func() {
 		e2eskipper.SkipIfNodeOSDistroIs("windows")
 	})
@@ -1001,32 +900,30 @@ var _ = SIGDescribe("User Namespaces for Pod Security Standards [LinuxOnly]", fu
 	f := framework.NewDefaultFramework("user-namespaces-pss-test")
 	f.NamespacePodSecurityLevel = admissionapi.LevelRestricted
 
-	ginkgo.Context("with UserNamespacesSupport and UserNamespacesPodSecurityStandards enabled", func() {
-		f.It("should allow pod", feature.UserNamespacesPodSecurityStandards, framework.WithFeatureGate(features.UserNamespacesSupport), framework.WithFeatureGate(features.UserNamespacesPodSecurityStandards), func(ctx context.Context) {
-			name := "pod-user-namespaces-pss-" + string(uuid.NewUUID())
-			pod := &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: name},
-				Spec: v1.PodSpec{
-					RestartPolicy:   v1.RestartPolicyNever,
-					HostUsers:       ptr.To(false),
-					SecurityContext: &v1.PodSecurityContext{},
-					Containers: []v1.Container{
-						{
-							Name:    name,
-							Image:   imageutils.GetE2EImage(imageutils.BusyBox),
-							Command: []string{"whoami"},
-							SecurityContext: &v1.SecurityContext{
-								AllowPrivilegeEscalation: ptr.To(false),
-								Capabilities:             &v1.Capabilities{Drop: []v1.Capability{"ALL"}},
-								SeccompProfile:           &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault},
-							},
+	f.It("should allow userns pod", feature.UserNamespacesSupport, func(ctx context.Context) {
+		name := "pod-user-namespaces-pss-" + string(uuid.NewUUID())
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1.PodSpec{
+				RestartPolicy:   v1.RestartPolicyNever,
+				HostUsers:       ptr.To(false),
+				SecurityContext: &v1.PodSecurityContext{},
+				Containers: []v1.Container{
+					{
+						Name:    name,
+						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
+						Command: []string{"whoami"},
+						SecurityContext: &v1.SecurityContext{
+							AllowPrivilegeEscalation: ptr.To(false),
+							Capabilities:             &v1.Capabilities{Drop: []v1.Capability{"ALL"}},
+							SeccompProfile:           &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault},
 						},
 					},
 				},
-			}
+			},
+		}
 
-			e2epodoutput.TestContainerOutput(ctx, f, "RunAsUser-RunAsNonRoot", pod, 0, []string{"root"})
-		})
+		e2epodoutput.TestContainerOutput(ctx, f, "RunAsUser-RunAsNonRoot", pod, 0, []string{"root"})
 	})
 })
 

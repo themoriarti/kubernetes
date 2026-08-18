@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -1609,9 +1610,9 @@ func TestValidateClusterTrustBundleUpdate(t *testing.T) {
 
 func TestValidatePodCertificateRequestCreate(t *testing.T) {
 	podUID1 := "pod-uid-1"
-	_, _, ed25519PubPKIX1, ed25519Proof1 := mustMakeEd25519KeyAndProof(t, []byte(podUID1))
-	_, _, ed25519PubPKIX2, ed25519Proof2 := mustMakeEd25519KeyAndProof(t, []byte("other-value"))
-	_, _, _, ed25519Proof3 := mustMakeEd25519KeyAndProof(t, []byte(podUID1))
+	_, _, ed25519PubPKIX1, ed25519Proof1, ed25519CSR1 := mustMakeEd25519KeyAndProof(t, []byte(podUID1), []string{})
+	_, _, ed25519PubPKIX2, ed25519Proof2, _ := mustMakeEd25519KeyAndProof(t, []byte("other-value"), []string{})
+	_, _, _, ed25519Proof3, _ := mustMakeEd25519KeyAndProof(t, []byte(podUID1), []string{})
 	_, _, ecdsaP224PubPKIX1, ecdsaP224Proof1 := mustMakeECDSAKeyAndProof(t, elliptic.P224(), []byte(podUID1))
 	_, _, ecdsaP256PubPKIX1, ecdsaP256Proof1 := mustMakeECDSAKeyAndProof(t, elliptic.P256(), []byte(podUID1))
 	_, _, ecdsaP384PubPKIX1, ecdsaP384Proof1 := mustMakeECDSAKeyAndProof(t, elliptic.P384(), []byte(podUID1))
@@ -1623,7 +1624,7 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 	_, _, rsaWrongProofPKIX, rsaWrongProof := mustMakeRSAKeyAndProof(t, 3072, []byte("other-value"))
 
 	podUIDEmpty := ""
-	_, _, pubPKIXEmpty, proofEmpty := mustMakeEd25519KeyAndProof(t, []byte(podUIDEmpty))
+	_, _, pubPKIXEmpty, proofEmpty, _ := mustMakeEd25519KeyAndProof(t, []byte(podUIDEmpty), []string{})
 
 	testCases := []struct {
 		description string
@@ -1651,6 +1652,52 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 				},
 			},
 			wantErrors: nil,
+		},
+		{
+			description: "valid Ed25519 PCR (using PKCS#10)",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					StubPKCS10Request:    ed25519CSR1,
+				},
+			},
+			wantErrors: nil,
+		},
+		{
+			description: "invalid Ed25519 PCR (both StubPKCS10Request and PKIXPublicKey set)",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        ed25519PubPKIX1,
+					ProofOfPossession:    ed25519Proof1,
+					StubPKCS10Request:    ed25519CSR1,
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("spec"), field.OmitValueType{}, "exactly one of (stubPKCS10Request) or (pkixPublicKey, proofOfPossession) must be set"),
+			},
 		},
 		{
 			description: "invalid Ed25519 proof of possession (correct key signed wrong message)",
@@ -2186,7 +2233,7 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 					NodeUID:              "node-uid-1",
 					MaxExpirationSeconds: ptr.To[int32](86400),
 					PKIXPublicKey:        make([]byte, capi.MaxPKIXPublicKeySize+1),
-					ProofOfPossession:    []byte{},
+					ProofOfPossession:    []byte("abc"),
 				},
 			},
 			wantErrors: field.ErrorList{
@@ -2209,12 +2256,87 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 					NodeName:             "node-1",
 					NodeUID:              "node-uid-1",
 					MaxExpirationSeconds: ptr.To[int32](86400),
-					PKIXPublicKey:        []byte{},
+					PKIXPublicKey:        ed25519PubPKIX1,
 					ProofOfPossession:    make([]byte, capi.MaxProofOfPossessionSize+1),
 				},
 			},
 			wantErrors: field.ErrorList{
 				field.TooLong(field.NewPath("spec", "proofOfPossession"), make([]byte, capi.MaxProofOfPossessionSize+1), capi.MaxProofOfPossessionSize),
+			},
+		},
+		{
+			description: "bad user annotations key name",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:                "foo.com/abc",
+					PodName:                   "pod-1",
+					PodUID:                    types.UID(podUID1),
+					ServiceAccountName:        "sa-1",
+					ServiceAccountUID:         "sa-uid-1",
+					NodeName:                  "node-1",
+					NodeUID:                   "node-uid-1",
+					MaxExpirationSeconds:      ptr.To[int32](86400),
+					PKIXPublicKey:             ed25519PubPKIX1,
+					ProofOfPossession:         ed25519Proof1,
+					UnverifiedUserAnnotations: map[string]string{"test/domain/foo": "bar"},
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "unverifiedUserAnnotations"), "test/domain/foo", "a valid label key must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]') with an optional DNS subdomain prefix and '/' (e.g. 'example.com/MyName')"),
+			},
+		},
+		{
+			description: "bad user annotations key prefix too long",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:                "foo.com/abc",
+					PodName:                   "pod-1",
+					PodUID:                    types.UID(podUID1),
+					ServiceAccountName:        "sa-1",
+					ServiceAccountUID:         "sa-uid-1",
+					NodeName:                  "node-1",
+					NodeUID:                   "node-uid-1",
+					MaxExpirationSeconds:      ptr.To[int32](86400),
+					PKIXPublicKey:             ed25519PubPKIX1,
+					ProofOfPossession:         ed25519Proof1,
+					UnverifiedUserAnnotations: map[string]string{strings.Repeat("a", 254) + "/foo": "bar"},
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "unverifiedUserAnnotations"), strings.Repeat("a", 254)+"/foo", "prefix part must be no more than 253 bytes"),
+			},
+		},
+		{
+			description: "bad user annotations key/value total size too long",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:                "foo.com/abc",
+					PodName:                   "pod-1",
+					PodUID:                    types.UID(podUID1),
+					ServiceAccountName:        "sa-1",
+					ServiceAccountUID:         "sa-uid-1",
+					NodeName:                  "node-1",
+					NodeUID:                   "node-uid-1",
+					MaxExpirationSeconds:      ptr.To[int32](86400),
+					PKIXPublicKey:             ed25519PubPKIX1,
+					ProofOfPossession:         ed25519Proof1,
+					UnverifiedUserAnnotations: map[string]string{"foo/bar": strings.Repeat("d", apimachineryvalidation.TotalAnnotationSizeLimitB)},
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.TooLong(field.NewPath("spec", "unverifiedUserAnnotations"), "", apimachineryvalidation.TotalAnnotationSizeLimitB),
 			},
 		},
 	}
@@ -2232,7 +2354,7 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 
 func TestValidatePodCertificateRequestUpdate(t *testing.T) {
 	podUID1 := "pod-uid-1"
-	_, _, pubPKIX1, proof1 := mustMakeEd25519KeyAndProof(t, []byte(podUID1))
+	_, _, pubPKIX1, proof1, _ := mustMakeEd25519KeyAndProof(t, []byte(podUID1), []string{})
 
 	testCases := []struct {
 		description    string
@@ -2248,16 +2370,17 @@ func TestValidatePodCertificateRequestUpdate(t *testing.T) {
 					Name:      "bar",
 				},
 				Spec: capi.PodCertificateRequestSpec{
-					SignerName:           "foo.com/abc",
-					PodName:              "pod-1",
-					PodUID:               types.UID(podUID1),
-					ServiceAccountName:   "sa-1",
-					ServiceAccountUID:    "sa-uid-1",
-					NodeName:             "node-1",
-					NodeUID:              "node-uid-1",
-					MaxExpirationSeconds: ptr.To[int32](86400),
-					PKIXPublicKey:        pubPKIX1,
-					ProofOfPossession:    proof1,
+					SignerName:                "foo.com/abc",
+					PodName:                   "pod-1",
+					PodUID:                    types.UID(podUID1),
+					ServiceAccountName:        "sa-1",
+					ServiceAccountUID:         "sa-uid-1",
+					NodeName:                  "node-1",
+					NodeUID:                   "node-uid-1",
+					MaxExpirationSeconds:      ptr.To[int32](86400),
+					PKIXPublicKey:             pubPKIX1,
+					ProofOfPossession:         proof1,
+					UnverifiedUserAnnotations: map[string]string{"test.domain/foo": "bar"},
 				},
 			},
 			newPCR: &capi.PodCertificateRequest{
@@ -2266,32 +2389,34 @@ func TestValidatePodCertificateRequestUpdate(t *testing.T) {
 					Name:      "bar",
 				},
 				Spec: capi.PodCertificateRequestSpec{
-					SignerName:           "foo.com/new",
-					PodName:              "new",
-					PodUID:               types.UID("new"),
-					ServiceAccountName:   "new",
-					ServiceAccountUID:    "new",
-					NodeName:             "new",
-					NodeUID:              "new",
-					MaxExpirationSeconds: ptr.To[int32](86401),
-					PKIXPublicKey:        pubPKIX1,
-					ProofOfPossession:    proof1,
+					SignerName:                "foo.com/new",
+					PodName:                   "new",
+					PodUID:                    types.UID("new"),
+					ServiceAccountName:        "new",
+					ServiceAccountUID:         "new",
+					NodeName:                  "new",
+					NodeUID:                   "new",
+					MaxExpirationSeconds:      ptr.To[int32](86401),
+					PKIXPublicKey:             pubPKIX1,
+					ProofOfPossession:         proof1,
+					UnverifiedUserAnnotations: map[string]string{"test.domain/foo": "foo"},
 				},
 			},
 			wantErrors: field.ErrorList{
 				field.Invalid(
 					field.NewPath("spec"),
 					capi.PodCertificateRequestSpec{
-						SignerName:           "foo.com/new",
-						PodName:              "new",
-						PodUID:               types.UID("new"),
-						ServiceAccountName:   "new",
-						ServiceAccountUID:    "new",
-						NodeName:             "new",
-						NodeUID:              "new",
-						MaxExpirationSeconds: ptr.To[int32](86401),
-						PKIXPublicKey:        pubPKIX1,
-						ProofOfPossession:    proof1,
+						SignerName:                "foo.com/new",
+						PodName:                   "new",
+						PodUID:                    types.UID("new"),
+						ServiceAccountName:        "new",
+						ServiceAccountUID:         "new",
+						NodeName:                  "new",
+						NodeUID:                   "new",
+						MaxExpirationSeconds:      ptr.To[int32](86401),
+						PKIXPublicKey:             pubPKIX1,
+						ProofOfPossession:         proof1,
+						UnverifiedUserAnnotations: map[string]string{"test.domain/foo": "foo"},
 					},
 					"field is immutable",
 				),
@@ -2317,14 +2442,19 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 	intermediateCACertDER, intermediateCAPrivKey := mustMakeIntermediateCA(t, caCertDER, caPrivKey)
 
 	podUID1 := "pod-uid-1"
-	_, pub1, pubPKIX1, proof1 := mustMakeEd25519KeyAndProof(t, []byte(podUID1))
+	_, pub1, pubPKIX1, proof1, _ := mustMakeEd25519KeyAndProof(t, []byte(podUID1), []string{})
 
-	pod1Cert1 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey)
-	pod1Cert2 := mustSignCertForPublicKey(t, 18*time.Hour, pub1, caCertDER, caPrivKey)
-	badCertTooShort := mustSignCertForPublicKey(t, 50*time.Minute, pub1, caCertDER, caPrivKey)
-	badCertTooLong := mustSignCertForPublicKey(t, 25*time.Hour, pub1, caCertDER, caPrivKey)
+	pod1Cert1 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, false, "", "")
+	pod1Cert2 := mustSignCertForPublicKey(t, 18*time.Hour, pub1, caCertDER, caPrivKey, false, "", "")
+	badCertTooShort := mustSignCertForPublicKey(t, 50*time.Minute, pub1, caCertDER, caPrivKey, false, "", "")
+	badCertTooLong := mustSignCertForPublicKey(t, 25*time.Hour, pub1, caCertDER, caPrivKey, false, "", "")
+	certWithBadDNSName1 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, true, "", "")
+	certWithBadDNSName2 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, true, "test-name..example", "")
+	certWithBadDNSName3 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, true, ".example", "")
+	certWithBadDNSName4 := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, true, "example.", "")
+	certWithBadEmailAddress := mustSignCertForPublicKey(t, 24*time.Hour, pub1, caCertDER, caPrivKey, false, "", "email@@address")
 
-	certFromIntermediate := mustSignCertForPublicKey(t, 24*time.Hour, pub1, intermediateCACertDER, intermediateCAPrivKey)
+	certFromIntermediate := mustSignCertForPublicKey(t, 24*time.Hour, pub1, intermediateCACertDER, intermediateCAPrivKey, false, "", "")
 
 	testCases := []struct {
 		description    string
@@ -3997,6 +4127,291 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				field.Invalid(field.NewPath("status", "certificateChain"), 25*time.Hour, "leaf certificate lifetime must be <= spec.maxExpirationSeconds (86400)"),
 			},
 		},
+		{
+			description: "leaf cert can not contain empty DNSName",
+			oldPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+			},
+			newPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+				Status: capi.PodCertificateRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               capi.PodCertificateRequestConditionTypeIssued,
+							Status:             metav1.ConditionTrue,
+							Reason:             "Whatever",
+							Message:            "Foo message",
+							LastTransitionTime: metav1.NewTime(time.Now()),
+						},
+					},
+					CertificateChain: certWithBadDNSName1,
+					NotBefore:        ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T00:00:00Z"))),
+					BeginRefreshAt:   ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T12:00:00Z"))),
+					NotAfter:         ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-02T00:00:00Z"))),
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("status", "certificateChain"), "", "leaf certificate should not contain empty DNSName"),
+			},
+		},
+		{
+			description: "leaf cert can not contain DNSName contains '..'",
+			oldPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+			},
+			newPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+				Status: capi.PodCertificateRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               capi.PodCertificateRequestConditionTypeIssued,
+							Status:             metav1.ConditionTrue,
+							Reason:             "Whatever",
+							Message:            "Foo message",
+							LastTransitionTime: metav1.NewTime(time.Now()),
+						},
+					},
+					CertificateChain: certWithBadDNSName2,
+					NotBefore:        ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T00:00:00Z"))),
+					BeginRefreshAt:   ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T12:00:00Z"))),
+					NotAfter:         ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-02T00:00:00Z"))),
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("status", "certificateChain"), "test-name..example", "leaf certificate's DNSName should not contain '..'"),
+			},
+		},
+		{
+			description: "leaf cert can not contain DNSName start with '.'",
+			oldPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+			},
+			newPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+				Status: capi.PodCertificateRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               capi.PodCertificateRequestConditionTypeIssued,
+							Status:             metav1.ConditionTrue,
+							Reason:             "Whatever",
+							Message:            "Foo message",
+							LastTransitionTime: metav1.NewTime(time.Now()),
+						},
+					},
+					CertificateChain: certWithBadDNSName3,
+					NotBefore:        ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T00:00:00Z"))),
+					BeginRefreshAt:   ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T12:00:00Z"))),
+					NotAfter:         ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-02T00:00:00Z"))),
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("status", "certificateChain"), ".example", "leaf certificate's DNSName should not start or end with '.'"),
+			},
+		},
+		{
+			description: "leaf cert can not contain DNSName end with '.'",
+			oldPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+			},
+			newPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+				Status: capi.PodCertificateRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               capi.PodCertificateRequestConditionTypeIssued,
+							Status:             metav1.ConditionTrue,
+							Reason:             "Whatever",
+							Message:            "Foo message",
+							LastTransitionTime: metav1.NewTime(time.Now()),
+						},
+					},
+					CertificateChain: certWithBadDNSName4,
+					NotBefore:        ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T00:00:00Z"))),
+					BeginRefreshAt:   ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T12:00:00Z"))),
+					NotAfter:         ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-02T00:00:00Z"))),
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("status", "certificateChain"), "example.", "leaf certificate's DNSName should not start or end with '.'"),
+			},
+		},
+		{
+			description: "leaf cert can not contain bad email address",
+			oldPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+			},
+			newPCR: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					PKIXPublicKey:        pubPKIX1,
+					ProofOfPossession:    proof1,
+				},
+				Status: capi.PodCertificateRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               capi.PodCertificateRequestConditionTypeIssued,
+							Status:             metav1.ConditionTrue,
+							Reason:             "Whatever",
+							Message:            "Foo message",
+							LastTransitionTime: metav1.NewTime(time.Now()),
+						},
+					},
+					CertificateChain: certWithBadEmailAddress,
+					NotBefore:        ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T00:00:00Z"))),
+					BeginRefreshAt:   ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-01T12:00:00Z"))),
+					NotAfter:         ptr.To(metav1.NewTime(mustParseTime(t, "1970-01-02T00:00:00Z"))),
+				},
+			},
+			wantErrors: field.ErrorList{
+				field.Invalid(field.NewPath("status", "certificateChain"), "email@@address", "leaf certificate should not contain invalid EmailAddress"),
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -4069,7 +4484,7 @@ func mustParseTime(t *testing.T, stamp string) time.Time {
 	return got
 }
 
-func mustMakeEd25519KeyAndProof(t *testing.T, toBeSigned []byte) (ed25519.PrivateKey, ed25519.PublicKey, []byte, []byte) {
+func mustMakeEd25519KeyAndProof(t *testing.T, toBeSigned []byte, pkcs10DNSSANS []string) (ed25519.PrivateKey, ed25519.PublicKey, []byte, []byte, []byte) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("Error while generating ed25519 key: %v", err)
@@ -4079,7 +4494,13 @@ func mustMakeEd25519KeyAndProof(t *testing.T, toBeSigned []byte) (ed25519.Privat
 		t.Fatalf("Error while marshaling PKIX public key: %v", err)
 	}
 	sig := ed25519.Sign(priv, toBeSigned)
-	return priv, pub, pubPKIX, sig
+
+	pkcs10DER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: pkcs10DNSSANS}, priv)
+	if err != nil {
+		t.Fatalf("Error while creating PKCS#10 certificate signing request: %v", err)
+	}
+
+	return priv, pub, pubPKIX, sig, pkcs10DER
 }
 
 func mustMakeECDSAKeyAndProof(t *testing.T, curve elliptic.Curve, toBeSigned []byte) (*ecdsa.PrivateKey, *ecdsa.PublicKey, []byte, []byte) {
@@ -4114,7 +4535,7 @@ func mustMakeRSAKeyAndProof(t *testing.T, modulusSize int, toBeSigned []byte) (*
 	return priv, &priv.PublicKey, pubPKIX, sig
 }
 
-func mustSignCertForPublicKey(t *testing.T, validity time.Duration, subjectPublicKey crypto.PublicKey, caCertDER []byte, caPrivateKey crypto.PrivateKey) string {
+func mustSignCertForPublicKey(t *testing.T, validity time.Duration, subjectPublicKey crypto.PublicKey, caCertDER []byte, caPrivateKey crypto.PrivateKey, usebadDNSName bool, badDNSName, badEmailAddress string) string {
 	certTemplate := &x509.Certificate{
 		Subject: pkix.Name{
 			CommonName: "foo",
@@ -4123,6 +4544,12 @@ func mustSignCertForPublicKey(t *testing.T, validity time.Duration, subjectPubli
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		NotBefore:   mustParseTime(t, "1970-01-01T00:00:00Z"),
 		NotAfter:    mustParseTime(t, "1970-01-01T00:00:00Z").Add(validity),
+	}
+	if usebadDNSName {
+		certTemplate.DNSNames = append(certTemplate.DNSNames, badDNSName)
+	}
+	if badEmailAddress != "" {
+		certTemplate.EmailAddresses = append(certTemplate.EmailAddresses, badEmailAddress)
 	}
 
 	caCert, err := x509.ParseCertificate(caCertDER)

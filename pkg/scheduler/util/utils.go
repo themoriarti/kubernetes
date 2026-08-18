@@ -20,9 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
+	schedulingv1alpha2 "k8s.io/api/scheduling/v1alpha2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -95,7 +98,7 @@ func MoreImportantPod(pod1, pod2 *v1.Pod) bool {
 // Retriable defines the retriable errors during a scheduling cycle.
 func Retriable(err error) bool {
 	return apierrors.IsInternalError(err) || apierrors.IsServiceUnavailable(err) ||
-		net.IsConnectionRefused(err)
+		apierrors.IsConflict(err) || net.IsConnectionRefused(err)
 }
 
 // PatchPodStatus calculates the delta bytes change from <old.Status> to <newStatus>,
@@ -103,6 +106,10 @@ func Retriable(err error) bool {
 func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, namespace string, oldStatus *v1.PodStatus, newStatus *v1.PodStatus) error {
 	if newStatus == nil {
 		return nil
+	}
+
+	if oldStatus == nil {
+		oldStatus = &v1.PodStatus{}
 	}
 
 	oldData, err := json.Marshal(v1.Pod{Status: *oldStatus})
@@ -131,6 +138,45 @@ func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, n
 	return retry.OnError(retry.DefaultBackoff, Retriable, patchFn)
 }
 
+// PatchPodGroupStatus calculates the delta bytes change from <old.Status> to <newStatus>,
+// and then submits a request to API server to patch the PodGroup status changes.
+func PatchPodGroupStatus(ctx context.Context, cs kubernetes.Interface, name string,
+	namespace string, oldStatus *schedulingv1alpha2.PodGroupStatus,
+	newStatus *schedulingv1alpha2.PodGroupStatus) error {
+	if newStatus == nil {
+		return nil
+	}
+
+	if oldStatus == nil {
+		oldStatus = &schedulingv1alpha2.PodGroupStatus{}
+	}
+
+	oldData, err := json.Marshal(schedulingv1alpha2.PodGroup{Status: *oldStatus})
+	if err != nil {
+		return err
+	}
+
+	newData, err := json.Marshal(schedulingv1alpha2.PodGroup{Status: *newStatus})
+	if err != nil {
+		return err
+	}
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, &schedulingv1alpha2.PodGroup{})
+	if err != nil {
+		return fmt.Errorf("failed to create merge patch for podgroup %q/%q: %w", namespace, name, err)
+	}
+
+	if string(patchBytes) == "{}" {
+		return nil
+	}
+
+	patchFn := func() error {
+		_, err := cs.SchedulingV1alpha2().PodGroups(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
+		return err
+	}
+
+	return retry.OnError(retry.DefaultBackoff, Retriable, patchFn)
+}
+
 // DeletePod deletes the given <pod> from API server
 func DeletePod(ctx context.Context, cs kubernetes.Interface, pod *v1.Pod) error {
 	return cs.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
@@ -140,6 +186,12 @@ func DeletePod(ctx context.Context, cs kubernetes.Interface, pod *v1.Pod) error 
 func IsScalarResourceName(name v1.ResourceName) bool {
 	return v1helper.IsExtendedResourceName(name) || v1helper.IsHugePageResourceName(name) ||
 		v1helper.IsPrefixedNativeResource(name) || v1helper.IsAttachableVolumeResourceName(name)
+}
+
+// IsDRAExtendedResourceName returns true when name is an extended resource name, or an implicit extended resource name
+// derived from device class name with the format of deviceclass.resource.kubernetes.io/<device class name>
+func IsDRAExtendedResourceName(name v1.ResourceName) bool {
+	return v1helper.IsExtendedResourceName(name) || strings.HasPrefix(string(name), resourceapi.ResourceDeviceClassPrefix)
 }
 
 // As converts two objects to the given type.
@@ -204,4 +256,16 @@ func GetHostPorts(pod *v1.Pod) []v1.ContainerPort {
 		}
 	}
 	return ports
+}
+
+// PodGroupPriority returns priority of a given pod group.
+func PodGroupPriority(pg *schedulingv1alpha2.PodGroup) int32 {
+	if pg.Spec.Priority != nil {
+		return *pg.Spec.Priority
+	}
+	// When priority of a pod group is nil, it means it was created at a time
+	// that there was no global default priority class and the priority class
+	// name of the pod group was empty (or when the WorkloadAwarePreemption
+	// feature gate was disabled). So, we resolve to the static default priority.
+	return 0
 }

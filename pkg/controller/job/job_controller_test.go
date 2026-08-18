@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -28,11 +29,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+
 	batch "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha2 "k8s.io/api/scheduling/v1alpha2"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -132,7 +136,12 @@ func newControllerFromClient(ctx context.Context, t *testing.T, kubeClient clien
 func newControllerFromClientWithClock(ctx context.Context, t *testing.T, kubeClient clientset.Interface, resyncPeriod controller.ResyncPeriodFunc, clock clock.WithTicker) (*Controller, informers.SharedInformerFactory) {
 	t.Helper()
 	sharedInformers := informers.NewSharedInformerFactory(kubeClient, resyncPeriod())
-	jm, err := newControllerWithClock(ctx, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), kubeClient, clock)
+	jm, err := newControllerWithClock(ctx, kubeClient, clock,
+		sharedInformers.Core().V1().Pods(),
+		sharedInformers.Batch().V1().Jobs(),
+		sharedInformers.Scheduling().V1alpha2().Workloads(),
+		sharedInformers.Scheduling().V1alpha2().PodGroups(),
+	)
 	if err != nil {
 		t.Fatalf("Error creating Job controller: %v", err)
 	}
@@ -289,7 +298,6 @@ func TestControllerSyncJob(t *testing.T) {
 		expectedPodPatches     int
 
 		// features
-		podIndexLabelDisabled   bool
 		jobPodReplacementPolicy bool
 		jobSuccessPolicy        bool
 		jobManagedBy            bool
@@ -1145,17 +1153,6 @@ func TestControllerSyncJob(t *testing.T) {
 			expectedReady:           ptr.To[int32](0),
 			expectedTerminating:     ptr.To[int32](0),
 		},
-		"indexed job with podIndexLabel feature disabled": {
-			parallelism:            2,
-			completions:            5,
-			backoffLimit:           6,
-			completionMode:         batch.IndexedCompletion,
-			expectedCreations:      2,
-			expectedActive:         2,
-			expectedCreatedIndexes: sets.New(0, 1),
-			podIndexLabelDisabled:  true,
-			expectedReady:          ptr.To[int32](0),
-		},
 		"FailureTarget=False condition added manually is ignored": {
 			parallelism: 1,
 			completions: 1,
@@ -1250,20 +1247,18 @@ func TestControllerSyncJob(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			logger, _ := ktesting.NewTestContext(t)
-			if tc.podIndexLabelDisabled {
-				// TODO: this will be removed in 1.35 when 1.31 will fall out of support matrix
-				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.31"))
-			} else if !tc.jobSuccessPolicy {
+			if !tc.jobSuccessPolicy {
 				// TODO: this will be removed in 1.36.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.32"))
 			} else if !tc.jobPodReplacementPolicy {
 				// TODO: this will be removed in 1.37.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.33"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.PodIndexLabel, !tc.podIndexLabelDisabled)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.jobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobSuccessPolicy, tc.jobSuccessPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.jobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobPodReplacementPolicy: tc.jobPodReplacementPolicy,
+				features.JobSuccessPolicy:        tc.jobSuccessPolicy,
+				features.JobManagedBy:            tc.jobManagedBy,
+			})
 			// job manager setup
 			clientSet := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 
@@ -1351,7 +1346,7 @@ func TestControllerSyncJob(t *testing.T) {
 				t.Errorf("Unexpected number of creates.  Expected %d, saw %d\n", tc.expectedCreations, len(fakePodControl.Templates))
 			}
 			if tc.completionMode == batch.IndexedCompletion {
-				checkIndexedJobPods(t, &fakePodControl, tc.expectedCreatedIndexes, job.Name, tc.podIndexLabelDisabled)
+				checkIndexedJobPods(t, &fakePodControl, tc.expectedCreatedIndexes, job.Name)
 			} else {
 				for _, p := range fakePodControl.Templates {
 					// Fake pod control doesn't add generate name from the owner reference.
@@ -1432,14 +1427,12 @@ func TestControllerSyncJob(t *testing.T) {
 	}
 }
 
-func checkIndexedJobPods(t *testing.T, control *controller.FakePodControl, wantIndexes sets.Set[int], jobName string, podIndexLabelDisabled bool) {
+func checkIndexedJobPods(t *testing.T, control *controller.FakePodControl, wantIndexes sets.Set[int], jobName string) {
 	t.Helper()
 	gotIndexes := sets.New[int]()
 	for _, p := range control.Templates {
-		checkJobCompletionEnvVariable(t, &p.Spec, podIndexLabelDisabled)
-		if !podIndexLabelDisabled {
-			checkJobCompletionLabel(t, &p)
-		}
+		checkJobCompletionEnvVariable(t, &p.Spec)
+		checkJobCompletionLabel(t, &p)
 		ix := getCompletionIndex(p.Annotations)
 		if ix == -1 {
 			t.Errorf("Created pod %s didn't have completion index", p.Name)
@@ -2447,10 +2440,12 @@ func TestTrackJobStatusAndRemoveFinalizers(t *testing.T) {
 				// TODO: this will be removed in 1.36
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.32"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobSuccessPolicy, tc.enableJobSuccessPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobBackoffLimitPerIndex: tc.enableJobBackoffLimitPerIndex,
+				features.JobSuccessPolicy:        tc.enableJobSuccessPolicy,
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+				features.JobManagedBy:            tc.enableJobManagedBy,
+			})
 
 			clientSet := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 			manager, _ := newControllerFromClientWithClock(ctx, t, clientSet, controller.NoResyncPeriodFunc, fakeClock)
@@ -2703,9 +2698,14 @@ func TestSyncJobPastDeadline(t *testing.T) {
 			if !tc.enableJobPodReplacementPolicy {
 				// TODO: this will be removed in 1.37.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.33"))
+			} else if !tc.enableJobManagedBy {
+				// TODO: this will be removed in 1.38.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.34"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobManagedBy:            tc.enableJobManagedBy,
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+			})
 			// job manager setup
 			clientSet := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 			manager, sharedInformerFactory := newControllerFromClient(ctx, t, clientSet, controller.NoResyncPeriodFunc)
@@ -2949,6 +2949,7 @@ func TestSyncJobWhenManagedBy(t *testing.T) {
 		TypeMeta: metav1.TypeMeta{Kind: "Job"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "foobar",
+			UID:       "foobaruid",
 			Namespace: metav1.NamespaceDefault,
 		},
 		Spec: batch.JobSpec{
@@ -3032,6 +3033,8 @@ func TestSyncJobWhenManagedBy(t *testing.T) {
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
+			// TODO: this will be removed in 1.38.
+			featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.34"))
 			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
 
 			clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
@@ -4180,8 +4183,10 @@ func TestSyncJobWithJobPodFailurePolicy(t *testing.T) {
 				// TODO: this will be removed in 1.37.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.33"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+				features.JobManagedBy:            tc.enableJobManagedBy,
+			})
 
 			if tc.job.Spec.PodReplacementPolicy == nil {
 				tc.job.Spec.PodReplacementPolicy = podReplacementPolicy(batch.Failed)
@@ -4201,7 +4206,6 @@ func TestSyncJobWithJobPodFailurePolicy(t *testing.T) {
 			}
 			sharedInformerFactory.Batch().V1().Jobs().Informer().GetIndexer().Add(job)
 			for i, pod := range tc.pods {
-				pod := pod
 				pb := podBuilder{Pod: &pod}.name(fmt.Sprintf("mypod-%d", i)).job(job)
 				if job.Spec.CompletionMode != nil && *job.Spec.CompletionMode == batch.IndexedCompletion {
 					pb.index(fmt.Sprintf("%v", i))
@@ -5192,11 +5196,16 @@ func TestSyncJobWithJobSuccessPolicy(t *testing.T) {
 			if !tc.enableBackoffLimitPerIndex || !tc.enableJobSuccessPolicy {
 				// TODO: this will be removed in 1.36
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			} else if !tc.enableJobManagedBy {
+				// TODO: this will be remove in 1.38
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.34"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableBackoffLimitPerIndex)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobSuccessPolicy, tc.enableJobSuccessPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobBackoffLimitPerIndex: tc.enableBackoffLimitPerIndex,
+				features.JobSuccessPolicy:        tc.enableJobSuccessPolicy,
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+				features.JobManagedBy:            tc.enableJobManagedBy,
+			})
 
 			clientSet := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 			fakeClock := clocktesting.NewFakeClock(now)
@@ -5877,10 +5886,15 @@ func TestSyncJobWithJobBackoffLimitPerIndex(t *testing.T) {
 			} else if !tc.enableJobPodReplacementPolicy {
 				// TODO: this will be removed in 1.37.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.33"))
+			} else if !tc.enableJobManagedBy {
+				// TODO: this will be removed in 1.38.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.34"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobBackoffLimitPerIndex: tc.enableJobBackoffLimitPerIndex,
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+				features.JobManagedBy:            tc.enableJobManagedBy,
+			})
 			clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 			fakeClock := clocktesting.NewFakeClock(now)
 			manager, sharedInformerFactory := newControllerFromClientWithClock(ctx, t, clientset, controller.NoResyncPeriodFunc, fakeClock)
@@ -5897,7 +5911,6 @@ func TestSyncJobWithJobBackoffLimitPerIndex(t *testing.T) {
 			}
 			sharedInformerFactory.Batch().V1().Jobs().Informer().GetIndexer().Add(job)
 			for i, pod := range tc.pods {
-				pod := pod
 				pb := podBuilder{Pod: &pod}.name(fmt.Sprintf("mypod-%d", i)).job(job)
 				if job.Spec.CompletionMode != nil && *job.Spec.CompletionMode == batch.IndexedCompletion {
 					pb.index(fmt.Sprintf("%v", getCompletionIndex(pod.Annotations)))
@@ -6594,9 +6607,9 @@ func TestSyncJobExpectations(t *testing.T) {
 }
 
 func TestWatchJobs(t *testing.T) {
-	_, ctx := ktesting.NewTestContext(t)
+	logger, ctx := ktesting.NewTestContext(t)
 	clientset := fake.NewClientset()
-	fakeWatch := watch.NewFake()
+	fakeWatch := watch.NewFakeWithOptions(watch.FakeOptions{Logger: &logger})
 	clientset.PrependWatchReactor("jobs", core.DefaultWatchReactor(fakeWatch, nil))
 	manager, sharedInformerFactory := newControllerFromClient(ctx, t, clientset, controller.NoResyncPeriodFunc)
 	manager.podStoreSynced = alwaysReady
@@ -6638,10 +6651,10 @@ func TestWatchJobs(t *testing.T) {
 }
 
 func TestWatchPods(t *testing.T) {
-	_, ctx := ktesting.NewTestContext(t)
+	logger, ctx := ktesting.NewTestContext(t)
 	testJob := newJob(2, 2, 6, batch.NonIndexedCompletion)
 	clientset := fake.NewClientset(testJob)
-	fakeWatch := watch.NewFake()
+	fakeWatch := watch.NewFakeWithOptions(watch.FakeOptions{Logger: &logger})
 	clientset.PrependWatchReactor("pods", core.DefaultWatchReactor(fakeWatch, nil))
 	manager, sharedInformerFactory := newControllerFromClient(ctx, t, clientset, controller.NoResyncPeriodFunc)
 	manager.podStoreSynced = alwaysReady
@@ -6671,7 +6684,7 @@ func TestWatchPods(t *testing.T) {
 	}
 	// Start only the pod watcher and the workqueue, send a watch event,
 	// and make sure it hits the sync method for the right job.
-	go sharedInformerFactory.Core().V1().Pods().Informer().Run(ctx.Done())
+	go sharedInformerFactory.Core().V1().Pods().Informer().RunWithContext(ctx)
 	go manager.Run(ctx, 1)
 
 	pods := newPodList(1, v1.PodRunning, testJob)
@@ -6689,7 +6702,7 @@ func TestWatchOrphanPods(t *testing.T) {
 	t.Cleanup(cancel)
 	clientset := fake.NewClientset()
 	sharedInformers := informers.NewSharedInformerFactory(clientset, controller.NoResyncPeriodFunc())
-	manager, err := NewController(ctx, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), clientset)
+	manager, err := NewController(ctx, clientset, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), sharedInformers.Scheduling().V1alpha2().Workloads(), sharedInformers.Scheduling().V1alpha2().PodGroups())
 	if err != nil {
 		t.Fatalf("Error creating Job controller: %v", err)
 	}
@@ -6697,7 +6710,7 @@ func TestWatchOrphanPods(t *testing.T) {
 	manager.jobStoreSynced = alwaysReady
 
 	podInformer := sharedInformers.Core().V1().Pods().Informer()
-	go podInformer.Run(ctx.Done())
+	go podInformer.RunWithContext(ctx)
 	cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced)
 	go manager.Run(ctx, 1)
 
@@ -6760,7 +6773,7 @@ func TestSyncOrphanPod(t *testing.T) {
 	_, ctx := ktesting.NewTestContext(t)
 	clientset := fake.NewClientset()
 	sharedInformers := informers.NewSharedInformerFactory(clientset, controller.NoResyncPeriodFunc())
-	manager, err := NewController(ctx, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), clientset)
+	manager, err := NewController(ctx, clientset, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), sharedInformers.Scheduling().V1alpha2().Workloads(), sharedInformers.Scheduling().V1alpha2().PodGroups())
 	if err != nil {
 		t.Fatalf("Error creating Job controller: %v", err)
 	}
@@ -6768,7 +6781,7 @@ func TestSyncOrphanPod(t *testing.T) {
 	manager.jobStoreSynced = alwaysReady
 
 	podInformer := sharedInformers.Core().V1().Pods().Informer()
-	go podInformer.Run(ctx.Done())
+	go podInformer.RunWithContext(ctx)
 	cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced)
 	go manager.Run(ctx, 1)
 
@@ -7382,9 +7395,14 @@ func TestJobBackoffForOnFailure(t *testing.T) {
 			if !tc.enableJobPodReplacementPolicy {
 				// TODO: this will be removed in 1.37.
 				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.33"))
+			} else if !tc.enableJobManagedBy {
+				// TODO: this will be removed in 1.38.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.34"))
 			}
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
-			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.JobPodReplacementPolicy: tc.enableJobPodReplacementPolicy,
+				features.JobManagedBy:            tc.enableJobManagedBy,
+			})
 			// job manager setup
 			clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: "", ContentConfig: restclient.ContentConfig{GroupVersion: &schema.GroupVersion{Group: "", Version: "v1"}}})
 			manager, sharedInformerFactory := newControllerFromClient(ctx, t, clientset, controller.NoResyncPeriodFunc)
@@ -7677,7 +7695,7 @@ func TestFinalizersRemovedExpectations(t *testing.T) {
 	_, ctx := ktesting.NewTestContext(t)
 	clientset := fake.NewClientset()
 	sharedInformers := informers.NewSharedInformerFactory(clientset, controller.NoResyncPeriodFunc())
-	manager, err := NewController(ctx, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), clientset)
+	manager, err := NewController(ctx, clientset, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), sharedInformers.Scheduling().V1alpha2().Workloads(), sharedInformers.Scheduling().V1alpha2().PodGroups())
 	if err != nil {
 		t.Fatalf("Error creating Job controller: %v", err)
 	}
@@ -7719,7 +7737,7 @@ func TestFinalizersRemovedExpectations(t *testing.T) {
 		t.Errorf("Different expectations for removed finalizers after syncJob (-want,+got):\n%s", diff)
 	}
 
-	go sharedInformers.Core().V1().Pods().Informer().Run(ctx.Done())
+	go sharedInformers.Core().V1().Pods().Informer().RunWithContext(ctx)
 	cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced)
 
 	// Make sure the first syncJob sets the expectations, even after the caches synced.
@@ -7781,7 +7799,7 @@ func TestFinalizerCleanup(t *testing.T) {
 
 	clientset := fake.NewClientset()
 	sharedInformers := informers.NewSharedInformerFactory(clientset, controller.NoResyncPeriodFunc())
-	manager, err := NewController(ctx, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), clientset)
+	manager, err := NewController(ctx, clientset, sharedInformers.Core().V1().Pods(), sharedInformers.Batch().V1().Jobs(), sharedInformers.Scheduling().V1alpha2().Workloads(), sharedInformers.Scheduling().V1alpha2().PodGroups())
 	if err != nil {
 		t.Fatalf("Error creating Job controller: %v", err)
 	}
@@ -7863,14 +7881,9 @@ func checkJobCompletionLabel(t *testing.T, p *v1.PodTemplateSpec) {
 	}
 }
 
-func checkJobCompletionEnvVariable(t *testing.T, spec *v1.PodSpec, podIndexLabelDisabled bool) {
+func checkJobCompletionEnvVariable(t *testing.T, spec *v1.PodSpec) {
 	t.Helper()
-	var fieldPath string
-	if podIndexLabelDisabled {
-		fieldPath = fmt.Sprintf("metadata.annotations['%s']", batch.JobCompletionIndexAnnotation)
-	} else {
-		fieldPath = fmt.Sprintf("metadata.labels['%s']", batch.JobCompletionIndexAnnotation)
-	}
+	fieldPath := fmt.Sprintf("metadata.labels['%s']", batch.JobCompletionIndexAnnotation)
 	want := []v1.EnvVar{
 		{
 			Name: "JOB_COMPLETION_INDEX",
@@ -8019,10 +8032,8 @@ func (pb podBuilder) phase(p v1.PodPhase) podBuilder {
 }
 
 func (pb podBuilder) trackingFinalizer() podBuilder {
-	for _, f := range pb.Finalizers {
-		if f == batch.JobTrackingFinalizer {
-			return pb
-		}
+	if slices.Contains(pb.Finalizers, batch.JobTrackingFinalizer) {
+		return pb
 	}
 	pb.Finalizers = append(pb.Finalizers, batch.JobTrackingFinalizer)
 	return pb
@@ -8036,6 +8047,201 @@ func (pb podBuilder) deletionTimestamp() podBuilder {
 func (pb podBuilder) customDeletionTimestamp(t time.Time) podBuilder {
 	pb.DeletionTimestamp = &metav1.Time{Time: t}
 	return pb
+}
+
+func TestSyncJobPodSchedulingGroup(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
+
+	gangJob := newGangSchedulingJob("test-job", 4)
+	gangJob.Spec.BackoffLimit = ptr.To[int32](6)
+	templateName := fmt.Sprintf("%s-pgt-%d", gangJob.Name, 0)
+
+	makeWorkload := func(job *batch.Job) *schedulingv1alpha2.Workload {
+		return &schedulingv1alpha2.Workload{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            computeWorkloadName(job),
+				Namespace:       metav1.NamespaceDefault,
+				UID:             types.UID("wl-uid"),
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, controllerKind)},
+			},
+			Spec: schedulingv1alpha2.WorkloadSpec{
+				ControllerRef: &schedulingv1alpha2.TypedLocalObjectReference{
+					APIGroup: "batch",
+					Kind:     "Job",
+					Name:     job.Name,
+				},
+				PodGroupTemplates: []schedulingv1alpha2.PodGroupTemplate{
+					{Name: templateName},
+				},
+			},
+		}
+	}
+
+	makePodGroup := func(job *batch.Job, wl *schedulingv1alpha2.Workload) *schedulingv1alpha2.PodGroup {
+		return &schedulingv1alpha2.PodGroup{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "scheduling.k8s.io/v1alpha2",
+				Kind:       "PodGroup",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            computePodGroupName(wl.Name, templateName),
+				Namespace:       metav1.NamespaceDefault,
+				UID:             types.UID("pg-uid"),
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, controllerKind)},
+			},
+			Spec: schedulingv1alpha2.PodGroupSpec{
+				PodGroupTemplateRef: &schedulingv1alpha2.PodGroupTemplateReference{
+					Workload: &schedulingv1alpha2.WorkloadPodGroupTemplateReference{
+						WorkloadName:         wl.Name,
+						PodGroupTemplateName: templateName,
+					},
+				},
+			},
+		}
+	}
+
+	gangWorkload := makeWorkload(gangJob)
+	gangPodGroup := makePodGroup(gangJob, gangWorkload)
+
+	testCases := map[string]struct {
+		job              *batch.Job
+		existingWorkload *schedulingv1alpha2.Workload
+		existingPodGroup *schedulingv1alpha2.PodGroup
+
+		workloadWithJob bool
+
+		wantSchedulingGroupName string
+		wantPodGroupOwnerRef    bool
+		wantCreations           int32
+	}{
+		"gang-eligible job with PodGroup: pods get schedulingGroup and ownerRef": {
+			job:              gangJob,
+			workloadWithJob:  true,
+			existingWorkload: gangWorkload,
+			existingPodGroup: gangPodGroup,
+
+			wantSchedulingGroupName: gangPodGroup.Name,
+			wantPodGroupOwnerRef:    true,
+			wantCreations:           4,
+		},
+		"non-eligible job: no schedulingGroup on pods": {
+			job:             newJob(2, 5, 6, batch.NonIndexedCompletion),
+			workloadWithJob: true,
+			wantCreations:   2,
+		},
+		"job with pre-existing schedulingGroup: preserved without PodGroup ownerRef": {
+			job: func() *batch.Job {
+				j := newGangSchedulingJob("opt-out-job", 4)
+				j.Spec.BackoffLimit = ptr.To[int32](6)
+				j.Spec.Template.Spec.SchedulingGroup = &v1.PodSchedulingGroup{
+					PodGroupName: ptr.To("external-pg"),
+				}
+				return j
+			}(),
+			workloadWithJob:         true,
+			wantSchedulingGroupName: "external-pg",
+			wantCreations:           4,
+		},
+		"suspended gang-eligible job: discovers scheduling objects but creates no pods": {
+			job: func() *batch.Job {
+				j := newGangSchedulingJob("suspended-job", 4)
+				j.Spec.BackoffLimit = ptr.To[int32](6)
+				j.Spec.Suspend = ptr.To(true)
+				return j
+			}(),
+			workloadWithJob: true,
+			existingWorkload: func() *schedulingv1alpha2.Workload {
+				j := newGangSchedulingJob("suspended-job", 4)
+				return makeWorkload(j)
+			}(),
+			existingPodGroup: func() *schedulingv1alpha2.PodGroup {
+				j := newGangSchedulingJob("suspended-job", 4)
+				wl := makeWorkload(j)
+				return makePodGroup(j, wl)
+			}(),
+			wantCreations: 0,
+		},
+		"feature gate disabled: gang-eligible job creates pods without scheduling objects": {
+			job: func() *batch.Job {
+				j := newGangSchedulingJob("gang-job", 4)
+				j.Spec.BackoffLimit = ptr.To[int32](6)
+				return j
+			}(),
+			wantCreations: 4,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			var objs []runtime.Object
+			if tc.existingWorkload != nil {
+				objs = append(objs, tc.existingWorkload)
+			}
+			if tc.existingPodGroup != nil {
+				objs = append(objs, tc.existingPodGroup)
+			}
+			clientSet := fake.NewClientset(objs...)
+			// TODO: this will be removed in 1.38.
+			featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultFeatureGate, utilversion.MustParse("1.36"))
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+				features.GenericWorkload: tc.workloadWithJob,
+				features.WorkloadWithJob: tc.workloadWithJob,
+			})
+
+			jm, sharedInformers := newControllerFromClient(ctx, t, clientSet, controller.NoResyncPeriodFunc)
+
+			fakePodControl := controller.FakePodControl{}
+			jm.podControl = &fakePodControl
+			jm.updateStatusHandler = func(ctx context.Context, job *batch.Job) (*batch.Job, error) {
+				return job, nil
+			}
+
+			sharedInformers.Start(ctx.Done())
+			sharedInformers.WaitForCacheSync(ctx.Done())
+
+			if err := sharedInformers.Batch().V1().Jobs().Informer().GetIndexer().Add(tc.job); err != nil {
+				t.Fatalf("Failed to insert job in index: %v", err)
+			}
+
+			err := jm.syncJob(ctx, testutil.GetKey(tc.job, t))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if int32(len(fakePodControl.Templates)) != tc.wantCreations {
+				t.Fatalf("expected %d pod creations, got %d", tc.wantCreations, len(fakePodControl.Templates))
+			}
+
+			for i, tmpl := range fakePodControl.Templates {
+				if tc.wantSchedulingGroupName != "" {
+					if tmpl.Spec.SchedulingGroup == nil {
+						t.Errorf("pod template [%d]: expected schedulingGroup, got nil", i)
+						continue
+					}
+					if tmpl.Spec.SchedulingGroup.PodGroupName == nil || *tmpl.Spec.SchedulingGroup.PodGroupName != tc.wantSchedulingGroupName {
+						got := "<nil>"
+						if tmpl.Spec.SchedulingGroup.PodGroupName != nil {
+							got = *tmpl.Spec.SchedulingGroup.PodGroupName
+						}
+						t.Errorf("pod template [%d]: schedulingGroup.podGroupName = %q, want %q", i, got, tc.wantSchedulingGroupName)
+					}
+				} else if tmpl.Spec.SchedulingGroup != nil {
+					t.Errorf("pod template [%d]: expected nil schedulingGroup, got %v", i, tmpl.Spec.SchedulingGroup)
+				}
+
+				hasPGOwnerRef := false
+				for _, ref := range tmpl.OwnerReferences {
+					if ref.Kind == "PodGroup" {
+						hasPGOwnerRef = true
+						break
+					}
+				}
+				if tc.wantPodGroupOwnerRef != hasPGOwnerRef {
+					t.Errorf("pod template [%d]: PodGroup ownerRef present = %v, want %v", i, hasPGOwnerRef, tc.wantPodGroupOwnerRef)
+				}
+			}
+		})
+	}
 }
 
 func setDurationDuringTest(val *time.Duration, newVal time.Duration) func() {

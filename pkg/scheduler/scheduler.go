@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
+	schedulinglisters "k8s.io/client-go/listers/scheduling/v1alpha2"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	resourceslicetracker "k8s.io/dynamic-resource-allocation/resourceslice/tracker"
@@ -51,17 +52,12 @@ import (
 	frameworkplugins "k8s.io/kubernetes/pkg/scheduler/framework/plugins"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/noderesources"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodevolumelimits"
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 	"k8s.io/kubernetes/pkg/scheduler/profile"
 	"k8s.io/kubernetes/pkg/scheduler/util/assumecache"
 	"k8s.io/utils/clock"
-)
-
-const (
-	// Duration the scheduler will wait before expiring an assumed pod.
-	// See issue #106361 for more details about this parameter and its value.
-	durationToExpireAssumedPod time.Duration = 0
 )
 
 // ErrNoNodesAvailable is used to describe the error that no nodes available to schedule pods.
@@ -74,7 +70,7 @@ type Scheduler struct {
 	// by NodeLister and Algorithm.
 	Cache internalcache.Cache
 
-	Extenders []framework.Extender
+	Extenders []fwk.Extender
 
 	// NextPod should be a function that blocks until the next pod
 	// is available. We don't use a channel for this, because scheduling
@@ -88,7 +84,7 @@ type Scheduler struct {
 	// SchedulePod tries to schedule the given pod to one of the nodes in the node list.
 	// Return a struct of ScheduleResult with the name of suggested host on success,
 	// otherwise will return a FitError with reasons.
-	SchedulePod func(ctx context.Context, fwk framework.Framework, state fwk.CycleState, pod *v1.Pod) (ScheduleResult, error)
+	SchedulePod func(ctx context.Context, fwk framework.Framework, state fwk.CycleState, podInfo *framework.QueuedPodInfo) (ScheduleResult, error)
 
 	// Close this to shut down the scheduler.
 	StopEverything <-chan struct{}
@@ -118,10 +114,14 @@ type Scheduler struct {
 	// panic.
 	logger klog.Logger
 
+	podGroupLister schedulinglisters.PodGroupLister
+
 	// registeredHandlers contains the registrations of all handlers. It's used to check if all handlers have finished syncing before the scheduling cycles start.
 	registeredHandlers []cache.ResourceEventHandlerRegistration
 
 	nominatedNodeNameForExpectationEnabled bool
+	genericWorkloadEnabled                 bool
+	workloadAwarePreemptionEnabled         bool
 }
 
 func (sched *Scheduler) applyDefaultHandlers() {
@@ -160,7 +160,7 @@ type ScheduleResult struct {
 	// The number of nodes out of the evaluated ones that fit the pod.
 	FeasibleNodes int
 	// The nominating info for scheduling cycle.
-	nominatingInfo *framework.NominatingInfo
+	nominatingInfo *fwk.NominatingInfo
 }
 
 // WithComponentConfigVersion sets the component config version to the
@@ -313,28 +313,35 @@ func New(ctx context.Context,
 
 	podLister := informerFactory.Core().V1().Pods().Lister()
 	nodeLister := informerFactory.Core().V1().Nodes().Lister()
+	var podGroupLister schedulinglisters.PodGroupLister
+	if feature.DefaultFeatureGate.Enabled(features.GenericWorkload) {
+		podGroupLister = informerFactory.Scheduling().V1alpha2().PodGroups().Lister()
+	}
 
 	snapshot := internalcache.NewEmptySnapshot()
 	metricsRecorder := metrics.NewMetricsAsyncRecorder(1000, time.Second, stopEverything)
 	// waitingPods holds all the pods that are in the scheduler and waiting in the permit stage
 	waitingPods := frameworkruntime.NewWaitingPodsMap()
 
+	// podsInPreBind holds all the pods that are in the scheduler in the preBind phase
+	podsInPreBind := frameworkruntime.NewPodsInPreBindMap()
+
 	var resourceClaimCache *assumecache.AssumeCache
 	var resourceSliceTracker *resourceslicetracker.Tracker
-	var draManager framework.SharedDRAManager
+	var draManager fwk.SharedDRAManager
 	if feature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
 		resourceClaimInformer := informerFactory.Resource().V1().ResourceClaims().Informer()
 		resourceClaimCache = assumecache.NewAssumeCache(logger, resourceClaimInformer, "ResourceClaim", "", nil)
 		resourceSliceTrackerOpts := resourceslicetracker.Options{
-			EnableDeviceTaints:       feature.DefaultFeatureGate.Enabled(features.DRADeviceTaints),
+			EnableDeviceTaintRules:   feature.DefaultFeatureGate.Enabled(features.DRADeviceTaintRules),
 			EnableConsumableCapacity: feature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity),
 			SliceInformer:            informerFactory.Resource().V1().ResourceSlices(),
 			KubeClient:               client,
 		}
-		// If device taints are disabled, the additional informers are not needed and
+		// If device taint rules are disabled, the additional informers are not needed and
 		// the tracker turns into a simple wrapper around the slice informer.
-		if resourceSliceTrackerOpts.EnableDeviceTaints {
-			resourceSliceTrackerOpts.TaintInformer = informerFactory.Resource().V1alpha3().DeviceTaintRules()
+		if resourceSliceTrackerOpts.EnableDeviceTaintRules {
+			resourceSliceTrackerOpts.TaintInformer = informerFactory.Resource().V1beta2().DeviceTaintRules()
 			resourceSliceTrackerOpts.ClassInformer = informerFactory.Resource().V1().DeviceClasses()
 		}
 		resourceSliceTracker, err = resourceslicetracker.StartTracker(ctx, resourceSliceTrackerOpts)
@@ -343,10 +350,14 @@ func New(ctx context.Context,
 		}
 		draManager = dynamicresources.NewDRAManager(ctx, resourceClaimCache, resourceSliceTracker, informerFactory)
 	}
+	sharedCSIManager := nodevolumelimits.NewCSIManager(informerFactory.Storage().V1().CSINodes().Lister())
+
 	var apiDispatcher *apidispatcher.APIDispatcher
 	if feature.DefaultFeatureGate.Enabled(features.SchedulerAsyncAPICalls) {
 		apiDispatcher = apidispatcher.New(client, int(options.parallelism), apicalls.Relevances)
 	}
+
+	schedulerCache := internalcache.New(ctx, apiDispatcher, feature.DefaultFeatureGate.Enabled(features.GenericWorkload))
 
 	profiles, err := profile.NewMap(ctx, options.profiles, registry, recorderFactory,
 		frameworkruntime.WithComponentConfigVersion(options.componentConfigVersion),
@@ -360,7 +371,10 @@ func New(ctx context.Context,
 		frameworkruntime.WithExtenders(extenders),
 		frameworkruntime.WithMetricsRecorder(metricsRecorder),
 		frameworkruntime.WithWaitingPods(waitingPods),
+		frameworkruntime.WithPodsInPreBind(podsInPreBind),
 		frameworkruntime.WithAPIDispatcher(apiDispatcher),
+		frameworkruntime.WithSharedCSIManager(sharedCSIManager),
+		frameworkruntime.WithPodGroupManager(schedulerCache),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("initializing profiles: %v", err)
@@ -370,12 +384,12 @@ func New(ctx context.Context,
 		return nil, errors.New("at least one profile is required")
 	}
 
-	preEnqueuePluginMap := make(map[string]map[string]framework.PreEnqueuePlugin)
+	preEnqueuePluginMap := make(map[string]map[string]fwk.PreEnqueuePlugin)
 	queueingHintsPerProfile := make(internalqueue.QueueingHintMapPerProfile)
 	var returnErr error
 	for profileName, profile := range profiles {
 		plugins := profile.PreEnqueuePlugins()
-		preEnqueuePluginMap[profileName] = make(map[string]framework.PreEnqueuePlugin, len(plugins))
+		preEnqueuePluginMap[profileName] = make(map[string]fwk.PreEnqueuePlugin, len(plugins))
 		for _, plugin := range plugins {
 			preEnqueuePluginMap[profileName][plugin.Name()] = plugin
 		}
@@ -390,6 +404,12 @@ func New(ctx context.Context,
 		return nil, returnErr
 	}
 
+	// Extract pod signing functions from each profile
+	podSigners := make(map[string]internalqueue.PodSigner)
+	for profileName, profile := range profiles {
+		podSigners[profileName] = profile.SignPod
+	}
+
 	podQueue := internalqueue.NewSchedulingQueue(
 		profiles[options.profiles[0].SchedulerName].QueueSortFunc(),
 		informerFactory,
@@ -401,13 +421,12 @@ func New(ctx context.Context,
 		internalqueue.WithPreEnqueuePluginMap(preEnqueuePluginMap),
 		internalqueue.WithQueueingHintMapPerProfile(queueingHintsPerProfile),
 		internalqueue.WithPluginMetricsSamplePercent(pluginMetricsSamplePercent),
-		internalqueue.WithMetricsRecorder(*metricsRecorder),
+		internalqueue.WithMetricsRecorder(metricsRecorder),
 		internalqueue.WithAPIDispatcher(apiDispatcher),
+		internalqueue.WithPodSigners(podSigners),
 	)
 
-	schedulerCache := internalcache.New(ctx, durationToExpireAssumedPod, apiDispatcher)
-
-	var apiCache framework.APICacher
+	var apiCache fwk.APICacher
 	if apiDispatcher != nil {
 		apiCache = apicache.New(podQueue, schedulerCache)
 	}
@@ -434,11 +453,14 @@ func New(ctx context.Context,
 		logger:                                 logger,
 		APIDispatcher:                          apiDispatcher,
 		nominatedNodeNameForExpectationEnabled: feature.DefaultFeatureGate.Enabled(features.NominatedNodeNameForExpectation),
+		podGroupLister:                         podGroupLister,
+		genericWorkloadEnabled:                 feature.DefaultFeatureGate.Enabled(features.GenericWorkload),
+		workloadAwarePreemptionEnabled:         feature.DefaultFeatureGate.Enabled(features.WorkloadAwarePreemption),
 	}
 	sched.NextPod = podQueue.Pop
 	sched.applyDefaultHandlers()
 
-	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, resourceClaimCache, resourceSliceTracker, unionedGVKs(queueingHintsPerProfile)); err != nil {
+	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, resourceClaimCache, resourceSliceTracker, draManager, unionedGVKs(queueingHintsPerProfile)); err != nil {
 		return nil, fmt.Errorf("adding event handlers: %w", err)
 	}
 
@@ -451,7 +473,7 @@ var defaultQueueingHintFn = func(_ klog.Logger, _ *v1.Pod, _, _ interface{}) (fw
 	return fwk.Queue, nil
 }
 
-func buildQueueingHintMap(ctx context.Context, es []framework.EnqueueExtensions) (internalqueue.QueueingHintMap, error) {
+func buildQueueingHintMap(ctx context.Context, es []fwk.EnqueueExtensions) (internalqueue.QueueingHintMap, error) {
 	queueingHintMap := make(internalqueue.QueueingHintMap)
 	var returnErr error
 	for _, e := range es {
@@ -558,14 +580,14 @@ func NewInformerFactory(cs clientset.Interface, resyncPeriod time.Duration) info
 	return informerFactory
 }
 
-func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profiles []schedulerapi.KubeSchedulerProfile) ([]framework.Extender, error) {
-	var fExtenders []framework.Extender
+func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profiles []schedulerapi.KubeSchedulerProfile) ([]fwk.Extender, error) {
+	var fExtenders []fwk.Extender
 	if len(extenders) == 0 {
 		return nil, nil
 	}
 
 	var ignoredExtendedResources []string
-	var ignorableExtenders []framework.Extender
+	var ignorableExtenders []fwk.Extender
 	for i := range extenders {
 		logger.V(2).Info("Creating extender", "extender", extenders[i])
 		extender, err := NewHTTPExtender(&extenders[i])
@@ -616,7 +638,7 @@ func buildExtenders(logger klog.Logger, extenders []schedulerapi.Extender, profi
 	return fExtenders, nil
 }
 
-type FailureHandlerFn func(ctx context.Context, fwk framework.Framework, podInfo *framework.QueuedPodInfo, status *fwk.Status, nominatingInfo *framework.NominatingInfo, start time.Time)
+type FailureHandlerFn func(ctx context.Context, fwk framework.Framework, podInfo *framework.QueuedPodInfo, status *fwk.Status, nominatingInfo *fwk.NominatingInfo, start time.Time)
 
 func unionedGVKs(queueingHintsPerProfile internalqueue.QueueingHintMapPerProfile) map[fwk.EventResource]fwk.ActionType {
 	gvkMap := make(map[fwk.EventResource]fwk.ActionType)
@@ -653,4 +675,11 @@ func newPodInformer(cs clientset.Interface, resyncPeriod time.Duration) cache.Sh
 	}
 	informer.SetTransform(trim)
 	return informer
+}
+
+func (sched *Scheduler) CurrentCycle() int64 {
+	if sched.SchedulingQueue != nil {
+		return sched.SchedulingQueue.SchedulingCycle()
+	}
+	return 0
 }

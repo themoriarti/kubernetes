@@ -41,6 +41,9 @@ const (
 type Monitor interface {
 	ObserveReconciliationResult(action ActionLabel, err ErrorLabel, duration time.Duration)
 	ObserveMetricComputationResult(action ActionLabel, err ErrorLabel, duration time.Duration, metricType v2.MetricSourceType)
+	ObserveHPAAddition()
+	ObserveHPADeletion()
+	ObserveDesiredReplicas(namespace, hpaName string, desiredReplicas int32)
 }
 
 type monitor struct{}
@@ -51,12 +54,27 @@ func New() Monitor {
 
 // ObserveReconciliationResult observes some metrics from a reconciliation result.
 func (r *monitor) ObserveReconciliationResult(action ActionLabel, err ErrorLabel, duration time.Duration) {
-	reconciliationsTotal.WithLabelValues(string(action), string(err)).Inc()
-	reconciliationsDuration.WithLabelValues(string(action), string(err)).Observe(duration.Seconds())
+	ReconciliationsTotal.WithLabelValues(string(action), string(err)).Inc()
+	ReconciliationsDuration.WithLabelValues(string(action), string(err)).Observe(duration.Seconds())
 }
 
 // ObserveMetricComputationResult observes some metrics from a metric computation result.
 func (r *monitor) ObserveMetricComputationResult(action ActionLabel, err ErrorLabel, duration time.Duration, metricType v2.MetricSourceType) {
-	metricComputationTotal.WithLabelValues(string(action), string(err), string(metricType)).Inc()
-	metricComputationDuration.WithLabelValues(string(action), string(err), string(metricType)).Observe(duration.Seconds())
+	MetricComputationTotal.WithLabelValues(string(action), string(err), string(metricType)).Inc()
+	MetricComputationDuration.WithLabelValues(string(action), string(err), string(metricType)).Observe(duration.Seconds())
+}
+
+// ObserveHPAAddition observes the addition of an HPA object.
+func (r *monitor) ObserveHPAAddition() {
+	NumHorizontalPodAutoscalers.Inc()
+}
+
+// ObserveHPADeletion observes the deletion of an HPA object.
+func (r *monitor) ObserveHPADeletion() {
+	NumHorizontalPodAutoscalers.Dec()
+}
+
+// ObserveDesiredReplicas records the desired replica count for an HPA object.
+func (r *monitor) ObserveDesiredReplicas(namespace, hpaName string, desiredReplicas int32) {
+	DesiredReplicasCount.WithLabelValues(namespace, hpaName).Set(float64(desiredReplicas))
 }

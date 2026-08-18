@@ -35,6 +35,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	resourcehelper "k8s.io/component-helpers/resource"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	usernamespacefeature "k8s.io/kubernetes/pkg/kubelet/userns"
 	"k8s.io/kubernetes/pkg/volume"
@@ -112,20 +113,14 @@ func (plugin *emptyDirPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod) (volume
 }
 
 func calculateEmptyDirMemorySize(nodeAllocatableMemory *resource.Quantity, spec *volume.Spec, pod *v1.Pod) *resource.Quantity {
-	// if feature is disabled, continue the default behavior of linux host default
-	sizeLimit := &resource.Quantity{}
-	if !utilfeature.DefaultFeatureGate.Enabled(features.SizeMemoryBackedVolumes) {
-		return sizeLimit
-	}
-
 	// size limit defaults to node allocatable (pods can't consume more memory than all pods)
-	sizeLimit = nodeAllocatableMemory
+	sizeLimit := nodeAllocatableMemory
 	zero := resource.MustParse("0")
 
 	// determine pod resource allocation
 	// we use the same function for pod cgroup assignment to maintain consistent behavior
 	// NOTE: this could be nil on systems that do not support pod memory containment (i.e. windows)
-	podResourceConfig := cm.ResourceConfigForPod(pod, false, uint64(100000), false)
+	podResourceConfig := cm.ResourceConfigForPod(pod, false, uint64(100000), false, config.NoneMemoryReservationPolicy)
 	if podResourceConfig != nil && podResourceConfig.Memory != nil {
 		podMemoryLimit := resource.NewQuantity(*(podResourceConfig.Memory), resource.BinarySI)
 		// ensure 0 < value < size

@@ -19,6 +19,7 @@ package experimental
 import (
 	"fmt"
 
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	draapi "k8s.io/dynamic-resource-allocation/api"
 	"k8s.io/klog/v2"
@@ -34,9 +35,10 @@ import (
 type distinctAttributeConstraint struct {
 	logger        klog.Logger // Includes name and attribute name, so no need to repeat in log messages.
 	requestNames  sets.Set[string]
-	attributeName draapi.FullyQualifiedName
+	attributeName resourceapi.FullyQualifiedName
+	features      Features
 
-	attributes map[string]draapi.DeviceAttribute
+	attributes map[string]resourceapi.DeviceAttribute
 	numDevices int
 }
 
@@ -62,7 +64,7 @@ func (m *distinctAttributeConstraint) add(requestName, subRequestName string, de
 	}
 
 	if !m.matchesAttribute(*attribute) {
-		m.logger.V(7).Info("Constraint not satisfied, duplicated attribute")
+		m.logger.V(7).Info("Constraint not satisfied, has some duplicated attributes")
 		return false
 	}
 	m.attributes[requestName] = *attribute
@@ -91,21 +93,52 @@ func (m *distinctAttributeConstraint) matches(requestName, subRequestName string
 	}
 }
 
-func (m *distinctAttributeConstraint) matchesAttribute(attribute draapi.DeviceAttribute) bool {
+func (m *distinctAttributeConstraint) matchesAttribute(attribute resourceapi.DeviceAttribute) bool {
+	if m.features.ListTypeAttributes {
+		// Set-based comparison for ListAttributes feature:
+		// Check that the new device's attribute set is disjoint from all existing devices.
+		// This implements "Pairwise Disjoint" semantics for distinct attributes.
+		newSet := attributeAsSet(&attribute)
+		if newSet == nil {
+			m.logger.V(7).Info("Unknown attribute type")
+			return false
+		}
+
+		// Check that the new device is disjoint from each existing device
+		for _, attr := range m.attributes {
+			existingSet := attributeAsSet(&attr)
+			if existingSet == nil {
+				continue
+			}
+			if newSet.hasIntersection(existingSet) {
+				// New device has common elements with an existing device.
+				// This violates the distinct constraint.
+				m.logger.V(7).Info("Constraint not satisfied, devices have common elements")
+				return false
+			}
+		}
+
+		// New device is disjoint from all existing devices.
+		// The constraint is satisfied.
+		m.logger.V(7).Info("Constraint satisfied, new device is disjoint from all existing devices")
+		return true
+	}
+
+	// Scalar comparison (existing behavior)
 	for _, attr := range m.attributes {
 		switch {
 		case attribute.StringValue != nil:
-			if attr.StringValue != nil && attribute.StringValue == attr.StringValue {
+			if attr.StringValue != nil && *attribute.StringValue == *attr.StringValue {
 				m.logger.V(7).Info("String values duplicated")
 				return false
 			}
 		case attribute.IntValue != nil:
-			if attr.IntValue != nil && attribute.IntValue == attr.IntValue {
+			if attr.IntValue != nil && *attribute.IntValue == *attr.IntValue {
 				m.logger.V(7).Info("Int values duplicated")
 				return false
 			}
 		case attribute.BoolValue != nil:
-			if attr.BoolValue != nil && attribute.BoolValue == attr.BoolValue {
+			if attr.BoolValue != nil && *attribute.BoolValue == *attr.BoolValue {
 				m.logger.V(7).Info("Bool values duplicated")
 				return false
 			}
@@ -113,15 +146,18 @@ func (m *distinctAttributeConstraint) matchesAttribute(attribute draapi.DeviceAt
 			// semver 2.0.0 requires that version strings are in their
 			// minimal form (in particular, no leading zeros). Therefore a
 			// strict "exact equal" check can do a string comparison.
-			if attr.VersionValue != nil && attribute.VersionValue == attr.VersionValue {
+			if attr.VersionValue != nil && *attribute.VersionValue == *attr.VersionValue {
 				m.logger.V(7).Info("Version values duplicated")
 				return false
 			}
 		default:
 			// Unknown value type, cannot match.
+			// This condition should not be reached
+			// as the unknown value type should be failed on CEL compile (getAttributeValue).
 			m.logger.V(7).Info("Distinct attribute type unknown")
 			return false
 		}
 	}
+	// All distinct
 	return true
 }

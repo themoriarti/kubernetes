@@ -18,6 +18,7 @@ limitations under the License.
 // +k8s:validation-gen-scheme-registry=k8s.io/code-generator/cmd/validation-gen/testscheme.Scheme
 
 // This is a test package.
+// +k8s:validation-gen-nolint
 package defaultbehavior
 
 import "k8s.io/code-generator/cmd/validation-gen/testscheme"
@@ -127,18 +128,27 @@ type DirectComparableStruct struct {
 
 // +k8s:validateFalse="type NonDirectComparableStruct"
 type NonDirectComparableStruct struct {
-	// +k8s:validateFalse="field intField"
+	// +k8s:validateFalse="field intPtrField"
 	IntPtrField *int `json:"intPtrField"`
 }
 
 // +k8s:validateFalse="type NestedDirectComparableStruct"
 type NestedDirectComparableStruct struct {
-	// +k8s:validateFalse="field intField"
+	// +k8s:validateFalse="field directComparableStructField"
 	DirectComparableStructField DirectComparableStruct `json:"directComparableStructField"`
 }
 
 // +k8s:validateFalse="type NestedNonDirectComparableStruct"
 type NestedNonDirectComparableStruct struct {
-	// +k8s:validateFalse="field intField"
+	// +k8s:validateFalse="field nonDirectComparableStructField"
 	NonDirectComparableStructField NonDirectComparableStruct `json:"nonDirectComparableStructField"`
+}
+
+type MixComparableStruct struct {
+	TypeMeta int
+
+	Primitive string `json:"Primitive"`
+
+	// +k8s:validateFalse="field NonComparable"
+	NonComparable []string `json:"NonComparable"`
 }

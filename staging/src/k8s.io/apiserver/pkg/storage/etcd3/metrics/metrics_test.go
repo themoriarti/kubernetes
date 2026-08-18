@@ -60,6 +60,69 @@ func TestRecordDecodeError(t *testing.T) {
 	}
 }
 
+func TestRecordEtcdEvent(t *testing.T) {
+	registry := metrics.NewKubeRegistry()
+	defer registry.Reset()
+	registry.MustRegister(etcdEventsReceivedCounts)
+	testedMetrics := "apiserver_storage_events_received_total"
+	testCases := []struct {
+		desc     string
+		resource schema.GroupResource
+		want     string
+	}{
+		{
+			desc:     "record single event",
+			resource: schema.GroupResource{Group: "apps", Resource: "deployments"},
+			want: `# HELP apiserver_storage_events_received_total [BETA] Number of etcd events received split by kind.
+# TYPE apiserver_storage_events_received_total counter
+apiserver_storage_events_received_total{group="apps",resource="deployments"} 1
+`,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			RecordEtcdEvent(test.resource)
+			if err := testutil.GatherAndCompare(registry, strings.NewReader(test.want), testedMetrics); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRecordEtcdBookmark(t *testing.T) {
+	registry := metrics.NewKubeRegistry()
+	registry.MustRegister(etcdBookmarkTotal)
+
+	testCases := []struct {
+		desc          string
+		groupResource schema.GroupResource
+		callCount     int
+		want          string
+	}{
+		{
+			desc:          "test success",
+			groupResource: schema.GroupResource{Group: "apps", Resource: "deployments"},
+			callCount:     1,
+			want: `# HELP etcd_bookmark_total [ALPHA] Number of etcd bookmarks (progress notify events) split by kind.
+# TYPE etcd_bookmark_total counter
+etcd_bookmark_total{group="apps",resource="deployments"} 1
+`,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			for i := 0; i < test.callCount; i++ {
+				RecordEtcdBookmark(test.groupResource)
+			}
+			if err := testutil.GatherAndCompare(registry, strings.NewReader(test.want), "etcd_bookmark_total"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRecordEtcdRequest(t *testing.T) {
 	registry := metrics.NewKubeRegistry()
 
@@ -316,6 +379,7 @@ apiserver_resource_size_estimate_bytes{group="foo",resource="bar"} -1
 func TestDeleteStoreStats(t *testing.T) {
 	registry := metrics.NewKubeRegistry()
 	registry.MustRegister(objectCounts)
+	registry.MustRegister(newObjectCounts)
 	registry.MustRegister(resourceSizeEstimate)
 
 	UpdateStoreStats(schema.GroupResource{Group: "foo1", Resource: "bar1"}, storage.Stats{ObjectCount: 10}, nil)
@@ -325,12 +389,16 @@ func TestDeleteStoreStats(t *testing.T) {
 # TYPE apiserver_resource_size_estimate_bytes gauge
 apiserver_resource_size_estimate_bytes{group="foo1",resource="bar1"} -1
 apiserver_resource_size_estimate_bytes{group="foo2",resource="bar2"} 200
+# HELP apiserver_resource_objects [ALPHA] Number of stored objects at the time of last check split by kind. In case of a fetching error, the value will be -1.
+# TYPE apiserver_resource_objects gauge
+apiserver_resource_objects{group="foo1",resource="bar1"} 10
+apiserver_resource_objects{group="foo2",resource="bar2"} 20
 # HELP apiserver_storage_objects [STABLE] [DEPRECATED, consider using apiserver_resource_objects instead] Number of stored objects at the time of last check split by kind. In case of a fetching error, the value will be -1.
 # TYPE apiserver_storage_objects gauge
 apiserver_storage_objects{resource="bar1.foo1"} 10
 apiserver_storage_objects{resource="bar2.foo2"} 20
 `
-	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -339,19 +407,24 @@ apiserver_storage_objects{resource="bar2.foo2"} 20
 	expectedMetrics = `# HELP apiserver_resource_size_estimate_bytes [ALPHA] Estimated size of stored objects in database. Estimate is based on sum of last observed sizes of serialized objects. In case of a fetching error, the value will be -1.
 # TYPE apiserver_resource_size_estimate_bytes gauge
 apiserver_resource_size_estimate_bytes{group="foo2",resource="bar2"} 200
+# HELP apiserver_resource_objects [ALPHA] Number of stored objects at the time of last check split by kind. In case of a fetching error, the value will be -1.
+# TYPE apiserver_resource_objects gauge
+apiserver_resource_objects{group="foo2",resource="bar2"} 20
 # HELP apiserver_storage_objects [STABLE] [DEPRECATED, consider using apiserver_resource_objects instead] Number of stored objects at the time of last check split by kind. In case of a fetching error, the value will be -1.
 # TYPE apiserver_storage_objects gauge
 apiserver_storage_objects{resource="bar2.foo2"} 20
 `
-	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
 		t.Fatal(err)
 	}
 
 	DeleteStoreStats(schema.GroupResource{Group: "foo2", Resource: "bar2"})
 	expectedMetrics = `# HELP apiserver_storage_objects [STABLE] [DEPRECATED, consider using apiserver_resource_objects instead] Number of stored objects at the time of last check split by kind. In case of a fetching error, the value will be -1.
 # TYPE apiserver_storage_objects gauge
+# HELP apiserver_resource_size_estimate_bytes [ALPHA] Estimated size of stored objects in database. Estimate is based on sum of last observed sizes of serialized objects. In case of a fetching error, the value will be -1.
+# TYPE apiserver_resource_size_estimate_bytes gauge
 `
-	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(expectedMetrics), "apiserver_storage_objects", "apiserver_resource_objects", "apiserver_resource_size_estimate_bytes"); err != nil {
 		t.Fatal(err)
 	}
 }

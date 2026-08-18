@@ -129,7 +129,6 @@ items:
     - ""
     resources:
     - configmaps
-    - events
     - persistentvolumeclaims
     - replicationcontrollers
     - replicationcontrollers/scale
@@ -149,6 +148,17 @@ items:
     - serviceaccounts/token
     verbs:
     - create
+  - apiGroups:
+    - ""
+    - events.k8s.io
+    resources:
+    - events
+    verbs:
+    - create
+    - delete
+    - deletecollection
+    - patch
+    - update
   - apiGroups:
     - apps
     resources:
@@ -281,7 +291,6 @@ items:
     - ""
     resources:
     - bindings
-    - events
     - limitranges
     - namespaces/status
     - pods/log
@@ -297,6 +306,15 @@ items:
     - ""
     resources:
     - namespaces
+    verbs:
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - ""
+    - events.k8s.io
+    resources:
+    - events
     verbs:
     - get
     - list
@@ -926,6 +944,20 @@ items:
     - get
     - list
     - watch
+  - apiGroups:
+    - resource.k8s.io
+    resources:
+    - resourceclaims
+    verbs:
+    - create
+    - delete
+  - apiGroups:
+    - resource.k8s.io
+    resources:
+    - resourceclaims/binding
+    verbs:
+    - patch
+    - update
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: ClusterRole
   metadata:
@@ -976,6 +1008,7 @@ items:
     name: system:monitoring
   rules:
   - nonResourceURLs:
+    - /flagz
     - /healthz
     - /healthz/*
     - /livez
@@ -984,6 +1017,7 @@ items:
     - /metrics/slis
     - /readyz
     - /readyz/*
+    - /statusz
     verbs:
     - get
   - apiGroups:
@@ -1047,6 +1081,7 @@ items:
     - update
   - apiGroups:
     - ""
+    - events.k8s.io
     resources:
     - events
     verbs:

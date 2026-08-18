@@ -19,6 +19,7 @@ package windows
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -67,7 +68,7 @@ var _ = sigDescribe(feature.Windows, "Kubelet-Stats", framework.WithSerial(), sk
 				iterations := 5
 				var totalDurationMs int64
 
-				for i := 0; i < iterations; i++ {
+				for range iterations {
 					start := time.Now()
 					nodeStats, err := e2ekubelet.GetStatsSummary(ctx, f.ClientSet, targetNode.Name)
 					duration := time.Since(start)
@@ -159,7 +160,7 @@ var _ = sigDescribe(feature.Windows, "Kubelet-Stats", skipUnlessWindows(func() {
 				iterations := 1
 				var totalDurationMs int64
 
-				for i := 0; i < iterations; i++ {
+				for range iterations {
 					start := time.Now()
 					nodeStats, err := e2ekubelet.GetStatsSummary(ctx, f.ClientSet, targetNode.Name)
 					duration := time.Since(start)
@@ -210,6 +211,7 @@ var _ = sigDescribe(feature.Windows, "Kubelet-Stats", skipUnlessWindows(func() {
 
 // findWindowsNode finds a Windows node that is Ready and Schedulable
 func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, error) {
+	logger := klog.FromContext(ctx)
 	selector := labels.Set{"kubernetes.io/os": "windows"}.AsSelector()
 	nodeList, err := f.ClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 
@@ -220,7 +222,7 @@ func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, erro
 	var targetNode v1.Node
 	foundNode := false
 	for _, n := range nodeList.Items {
-		if e2enode.IsNodeReady(&n) && e2enode.IsNodeSchedulable(&n) {
+		if e2enode.IsNodeReady(logger, &n) && e2enode.IsNodeSchedulable(logger, &n) {
 			targetNode = n
 			foundNode = true
 			break
@@ -236,6 +238,7 @@ func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, erro
 
 // findWindowsNodes finds all Windows nodes that are Ready and Schedulable
 func findWindowsNodes(ctx context.Context, f *framework.Framework) ([]v1.Node, error) {
+	logger := klog.FromContext(ctx)
 	selector := labels.Set{"kubernetes.io/os": "windows"}.AsSelector()
 	nodeList, err := f.ClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 
@@ -245,7 +248,7 @@ func findWindowsNodes(ctx context.Context, f *framework.Framework) ([]v1.Node, e
 
 	var targetNodes []v1.Node
 	for _, n := range nodeList.Items {
-		if e2enode.IsNodeReady(&n) && e2enode.IsNodeSchedulable(&n) {
+		if e2enode.IsNodeReady(logger, &n) && e2enode.IsNodeSchedulable(logger, &n) {
 			targetNodes = append(targetNodes, n)
 		}
 	}
@@ -257,7 +260,7 @@ func findWindowsNodes(ctx context.Context, f *framework.Framework) ([]v1.Node, e
 func newKubeletStatsTestPods(numPods int, image imageutils.Config, nodeName string) []*v1.Pod {
 	var pods []*v1.Pod
 
-	for i := 0; i < numPods; i++ {
+	for i := range numPods {
 		podName := "statscollectiontest-" + string(uuid.NewUUID())
 		pod := v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{

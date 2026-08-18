@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2016 The Kubernetes Authors.
@@ -252,7 +251,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func(ctx context.Context) []byte {
 
 	if framework.TestContext.CriProxyEnabled {
 		framework.Logf("Start cri proxy")
-		rs, is, err := getCRIClient()
+		rs, is, err := getCRIClient(ctx)
 		framework.ExpectNoError(err)
 
 		e2eCriProxy = criproxy.NewRemoteRuntimeProxy(rs, is)
@@ -435,16 +434,6 @@ func loadSystemSpecFromFile(filename string) (*system.SysSpec, error) {
 		return nil, err
 	}
 	return spec, nil
-}
-
-// isNodeReady returns true if a node is ready; false otherwise.
-func isNodeReady(node *v1.Node) bool {
-	for _, c := range node.Status.Conditions {
-		if c.Type == v1.NodeReady {
-			return c.Status == v1.ConditionTrue
-		}
-	}
-	return false
 }
 
 func setExtraEnvs() {

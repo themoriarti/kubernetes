@@ -36,6 +36,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2edeployment "k8s.io/kubernetes/test/e2e/framework/deployment"
+	e2eendpointslice "k8s.io/kubernetes/test/e2e/framework/endpointslice"
 	"k8s.io/kubernetes/test/utils/crd"
 	"k8s.io/kubernetes/test/utils/format"
 	imageutils "k8s.io/kubernetes/test/utils/image"
@@ -340,7 +341,7 @@ func deployCustomResourceWebhookAndService(ctx context.Context, f *framework.Fra
 	framework.ExpectNoError(err, "creating service %s in namespace %s", serviceCRDName, namespace)
 
 	ginkgo.By("Verifying the service has paired with the endpoint")
-	err = framework.WaitForServiceEndpointsNum(ctx, client, namespace, serviceCRDName, 1, 1*time.Second, 30*time.Second)
+	err = e2eendpointslice.WaitForEndpointCount(ctx, client, namespace, serviceCRDName, 1)
 	framework.ExpectNoError(err, "waiting for service %s/%s have %d endpoint", namespace, serviceCRDName, 1)
 }
 
@@ -445,7 +446,7 @@ func testCRListConversion(ctx context.Context, f *framework.Framework, testCrd *
 	// Just retrying fixes that.
 	//
 	// TODO: we have to wait for the storage version to become effective. Storage version changes are not instant.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_, err = customResourceClients["v1"].Create(ctx, crInstance, metav1.CreateOptions{})
 		if err == nil {
 			break

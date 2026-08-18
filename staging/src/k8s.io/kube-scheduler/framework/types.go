@@ -21,9 +21,11 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-
+	ndf "k8s.io/component-helpers/nodedeclaredfeatures"
 	"k8s.io/klog/v2"
 )
 
@@ -50,6 +52,8 @@ const (
 	UpdateNodeTaint
 	UpdateNodeCondition
 	UpdateNodeAnnotation
+	// UpdateNodeDeclaredFeature is an update for node's declared features.
+	UpdateNodeDeclaredFeature
 
 	// UpdatePodXYZ is only applicable for Pod events.
 	// If you use UpdatePodXYZ,
@@ -71,7 +75,7 @@ const (
 	All ActionType = 1<<iota - 1
 
 	// Use the general Update type if you don't either know or care the specific sub-Update type to use.
-	Update = UpdateNodeAllocatable | UpdateNodeLabel | UpdateNodeTaint | UpdateNodeCondition | UpdateNodeAnnotation | UpdatePodLabel | UpdatePodScaleDown | UpdatePodToleration | UpdatePodSchedulingGatesEliminated | UpdatePodGeneratedResourceClaim
+	Update = UpdateNodeAllocatable | UpdateNodeLabel | UpdateNodeTaint | UpdateNodeCondition | UpdateNodeAnnotation | UpdateNodeDeclaredFeature | UpdatePodLabel | UpdatePodScaleDown | UpdatePodToleration | UpdatePodSchedulingGatesEliminated | UpdatePodGeneratedResourceClaim
 
 	// None is a special ActionType that is only used internally.
 	None ActionType = 0
@@ -93,6 +97,8 @@ func (a ActionType) String() string {
 		return "UpdateNodeCondition"
 	case UpdateNodeAnnotation:
 		return "UpdateNodeAnnotation"
+	case UpdateNodeDeclaredFeature:
+		return "UpdateNodeDeclaredFeature"
 	case UpdatePodLabel:
 		return "UpdatePodLabel"
 	case UpdatePodScaleDown:
@@ -165,6 +171,7 @@ const (
 	ResourceClaim         EventResource = "resource.k8s.io/ResourceClaim"
 	ResourceSlice         EventResource = "resource.k8s.io/ResourceSlice"
 	DeviceClass           EventResource = "resource.k8s.io/DeviceClass"
+	PodGroup              EventResource = "scheduling.k8s.io/PodGroup"
 
 	// WildCard is a special EventResource to match all resources.
 	// e.g., If you register `{Resource: "*", ActionType: All}` in EventsToRegister,
@@ -275,10 +282,14 @@ type NodeInfo interface {
 	// Whenever NodeInfo changes, generation is bumped.
 	// This is used to avoid cloning it if the object didn't change.
 	GetGeneration() int64
+	// GetNodeDeclaredFeatures returns the declared feature set of the node.
+	GetNodeDeclaredFeatures() ndf.FeatureSet
 	// Snapshot returns a copy of this node, Except that ImageStates is copied without the Nodes field.
 	Snapshot() NodeInfo
 	// String returns representation of human readable format of this NodeInfo.
 	String() string
+	// GetNodeAllocatableDRAClaimState returns the node allocatable DRA claim allocation states on this node.
+	GetNodeAllocatableDRAClaimState() map[types.NamespacedName]*NodeAllocatableDRAClaimState
 
 	// AddPodInfo adds pod information to this NodeInfo.
 	// Consider using this instead of AddPod if a PodInfo is already computed.
@@ -387,6 +398,98 @@ func (at *AffinityTerm) Matches(pod *v1.Pod, nsLabels labels.Set) bool {
 type WeightedAffinityTerm struct {
 	AffinityTerm
 	Weight int32
+}
+
+// GetAffinityTerms receives a Pod and affinity terms and returns the namespaces and
+// selectors of the terms.
+func GetAffinityTerms(pod *v1.Pod, v1Terms []v1.PodAffinityTerm) ([]AffinityTerm, error) {
+	if v1Terms == nil {
+		return nil, nil
+	}
+
+	var terms []AffinityTerm
+	for i := range v1Terms {
+		t, err := newAffinityTerm(pod, &v1Terms[i])
+		if err != nil {
+			// We get here if the label selector failed to process
+			return nil, err
+		}
+		terms = append(terms, *t)
+	}
+	return terms, nil
+}
+
+func newAffinityTerm(pod *v1.Pod, term *v1.PodAffinityTerm) (*AffinityTerm, error) {
+	selector, err := metav1.LabelSelectorAsSelector(term.LabelSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	namespaces := getNamespacesFromPodAffinityTerm(pod, term)
+	nsSelector, err := metav1.LabelSelectorAsSelector(term.NamespaceSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AffinityTerm{Namespaces: namespaces, Selector: selector, TopologyKey: term.TopologyKey, NamespaceSelector: nsSelector}, nil
+}
+
+// getNamespacesFromPodAffinityTerm returns a set of names according to the namespaces indicated in podAffinityTerm.
+// If namespaces is empty it considers the given pod's namespace.
+func getNamespacesFromPodAffinityTerm(pod *v1.Pod, podAffinityTerm *v1.PodAffinityTerm) sets.Set[string] {
+	names := sets.Set[string]{}
+	if len(podAffinityTerm.Namespaces) == 0 && podAffinityTerm.NamespaceSelector == nil {
+		names.Insert(pod.Namespace)
+	} else {
+		names.Insert(podAffinityTerm.Namespaces...)
+	}
+	return names
+}
+
+// GetPodAffinityTerms returns the list of PodAffinityTerms specified in the PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution field.
+func GetPodAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm) {
+	if affinity != nil && affinity.PodAffinity != nil {
+		if len(affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+			terms = affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		}
+		// TODO: Uncomment this block when implement RequiredDuringSchedulingRequiredDuringExecution.
+		// if len(affinity.PodAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
+		//	terms = append(terms, affinity.PodAffinity.RequiredDuringSchedulingRequiredDuringExecution...)
+		// }
+	}
+	return terms
+}
+
+// GetWeightedAffinityTerms returns affinity terms with weights, namespaces and selectors of the terms.
+func GetWeightedAffinityTerms(pod *v1.Pod, v1Terms []v1.WeightedPodAffinityTerm) ([]WeightedAffinityTerm, error) {
+	if v1Terms == nil {
+		return nil, nil
+	}
+
+	var terms []WeightedAffinityTerm
+	for i := range v1Terms {
+		t, err := newAffinityTerm(pod, &v1Terms[i].PodAffinityTerm)
+		if err != nil {
+			// We get here if the label selector failed to process
+			return nil, err
+		}
+		terms = append(terms, WeightedAffinityTerm{AffinityTerm: *t, Weight: v1Terms[i].Weight})
+	}
+	return terms, nil
+}
+
+// GetPodAntiAffinityTerms returns the list of PodAffinityTerms specified in the PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution field.
+func GetPodAntiAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm) {
+	if affinity != nil && affinity.PodAntiAffinity != nil {
+		if len(affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+			terms = affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		}
+		// TODO: Uncomment this block when implement RequiredDuringSchedulingRequiredDuringExecution.
+		// if len(affinity.PodAntiAffinity.RequiredDuringSchedulingRequiredDuringExecution) != 0 {
+		//	terms = append(terms, affinity.PodAntiAffinity.RequiredDuringSchedulingRequiredDuringExecution...)
+		// }
+	}
+	return terms
 }
 
 // Resource is a collection of compute resources.
@@ -534,5 +637,66 @@ func (h HostPortInfo) sanitize(ip, protocol *string) {
 	}
 	if len(*protocol) == 0 {
 		*protocol = string(v1.ProtocolTCP)
+	}
+}
+
+// PodGroupInfo is a wrapper around the PodGroup API object together with a list of unscheduled pods that belong to the pod group.
+// Typically used as an input to pod group scheduling cycle plugins.
+type PodGroupInfo interface {
+	// GetUnscheduledPods returns pods that are currently being considered for scheduling.
+	// The order of the pods is deterministic and based on signature, priority and timestamp.
+	// This structure only contains the pods considered for scheduling in the pod group scheduling cycle.
+	GetUnscheduledPods() []*v1.Pod
+
+	// GetName returns the PodGroup name that is used to identify the pod group.
+	GetName() string
+	// GetNamespace returns the namespace the pod group belongs to.
+	GetNamespace() string
+}
+
+// Placement determines the resources to be considered when scheduling a pod group.
+// Pod group scheduling cycle can check multiple placements and select the one that results
+// in the best pod assignments.
+type Placement struct {
+	// Name uniquely identifies the placement.
+	// This is used for diagnostics and debugability.
+	// The choice of the name is up to the PlacementGeneratePlugin.
+	Name string
+	// Nodes specifies the nodes that are valid for this placement.
+	// Scheduler will try to schedule the pod group using only those nodes.
+	Nodes []NodeInfo
+}
+
+// ProposedAssignment associates pod of a pod group with a proposed node assignment, determined in pod group scheduling cycle.
+type ProposedAssignment interface {
+	// GetPod returns the pod that has the proposed node assignment.
+	GetPod() *v1.Pod
+	// GetNodeName returns the name of the proposed node for the pod.
+	GetNodeName() string
+}
+
+// PodGroupAssignments holds the temporary assignments of pods in a pod group to nodes for a placement.
+// Can be used in the pod group scheduling cycle to determine the best placement for a pod group.
+type PodGroupAssignments struct {
+	*Placement
+	// ProposedAssignments associates pods with proposed nodes that were determined for a given placement
+	// during the pod group scheduling cycle.
+	// The pods are guaranteed to also be present in the PodGroupInfo.
+	ProposedAssignments []ProposedAssignment
+}
+
+// NodeAllocatableDRAClaimState holds information about a node allocatable resource DRA claim's allocation on a node.
+type NodeAllocatableDRAClaimState struct {
+	// ConsumerPods is a set of UIDs of pods that are consuming the DRA claim on this node.
+	ConsumerPods sets.Set[types.UID]
+}
+
+// Snapshot returns a copy of NodeAllocatableDRAClaimAllocationState with ConsumerPods cloned.
+func (s *NodeAllocatableDRAClaimState) Snapshot() *NodeAllocatableDRAClaimState {
+	if s == nil {
+		return nil
+	}
+	return &NodeAllocatableDRAClaimState{
+		ConsumerPods: s.ConsumerPods.Clone(),
 	}
 }

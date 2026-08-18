@@ -57,6 +57,8 @@ func pluginsNames(p *configv1.Plugins) []string {
 		p.Permit,
 		p.PreEnqueue,
 		p.QueueSort,
+		p.PlacementGenerate,
+		p.PlacementScore,
 	}
 	n := sets.New[string]()
 	for _, e := range extensions {
@@ -247,5 +249,11 @@ func SetDefaults_NodeResourcesFitArgs(obj *configv1.NodeResourcesFitArgs) {
 func SetDefaults_DynamicResourcesArgs(obj *configv1.DynamicResourcesArgs) {
 	if obj.FilterTimeout == nil && feature.DefaultFeatureGate.Enabled(features.DRASchedulerFilterTimeout) {
 		obj.FilterTimeout = &metav1.Duration{Duration: configv1.DynamicResourcesFilterTimeoutDefault}
+	}
+
+	if obj.BindingTimeout == nil &&
+		feature.DefaultFeatureGate.Enabled(features.DRADeviceBindingConditions) &&
+		feature.DefaultFeatureGate.Enabled(features.DRAResourceClaimDeviceStatus) {
+		obj.BindingTimeout = &metav1.Duration{Duration: configv1.DynamicResourcesBindingTimeoutDefault}
 	}
 }

@@ -355,7 +355,10 @@ var ResizeStrategy = podResizeStrategy{
 	),
 }
 
-// dropNonResizeUpdates discards all changes except for pod.Spec.Containers[*].Resources, pod.Spec.InitContainers[*].Resources, ResizePolicy and certain metadata
+// dropNonResizeUpdates discards all changes except for
+// pod.Spec.Containers[*].Resources, pod.Spec.InitContainers[*].Resources,
+// ResizePolicy and certain metadata. If InPlacePodLevelResourcesVerticalScaling
+// feature is enabled, pod-level resources are also preserved.
 func dropNonResizeUpdates(newPod, oldPod *api.Pod) *api.Pod {
 	// Containers are not allowed to be added, removed, re-ordered, or renamed.
 	// If we detect any of these changes, we will return new podspec as-is and
@@ -364,10 +367,19 @@ func dropNonResizeUpdates(newPod, oldPod *api.Pod) *api.Pod {
 		return newPod
 	}
 
+	// Preserve the incoming pod-level resource from the new pod object.
+	newPodResources := newPod.Spec.Resources
+
 	containers := dropNonResizeUpdatesForContainers(newPod.Spec.Containers, oldPod.Spec.Containers)
 	initContainers := dropNonResizeUpdatesForContainers(newPod.Spec.InitContainers, oldPod.Spec.InitContainers)
 
 	newPod.Spec = oldPod.Spec
+	// If PodLevelResources and InPlacePodLevelResourcesVerticalScaling feature gates is enabled,
+	// restore the saved pod-level resource requests to the new pod's spec.
+	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodLevelResourcesVerticalScaling) {
+		newPod.Spec.Resources = newPodResources
+	}
+
 	newPod.Status = oldPod.Status
 	metav1.ResetObjectMetaForStatus(&newPod.ObjectMeta, &oldPod.ObjectMeta)
 
@@ -723,7 +735,7 @@ func AttachLocation(
 	connInfo client.ConnectionInfoGetter,
 	name string,
 	opts *api.PodAttachOptions,
-) (*url.URL, http.RoundTripper, error) {
+) (*url.URL, *client.ConnectionInfo, error) {
 	return streamLocation(ctx, getter, connInfo, name, opts, opts.Container, "attach")
 }
 
@@ -735,7 +747,7 @@ func ExecLocation(
 	connInfo client.ConnectionInfoGetter,
 	name string,
 	opts *api.PodExecOptions,
-) (*url.URL, http.RoundTripper, error) {
+) (*url.URL, *client.ConnectionInfo, error) {
 	return streamLocation(ctx, getter, connInfo, name, opts, opts.Container, "exec")
 }
 
@@ -747,7 +759,7 @@ func streamLocation(
 	opts runtime.Object,
 	container,
 	path string,
-) (*url.URL, http.RoundTripper, error) {
+) (*url.URL, *client.ConnectionInfo, error) {
 	pod, err := getPod(ctx, getter, name)
 	if err != nil {
 		return nil, nil, err
@@ -779,7 +791,7 @@ func streamLocation(
 		Path:     fmt.Sprintf("/%s/%s/%s/%s", path, pod.Namespace, pod.Name, container),
 		RawQuery: params.Encode(),
 	}
-	return loc, nodeInfo.Transport, nil
+	return loc, nodeInfo, nil
 }
 
 // PortForwardLocation returns the port-forward URL for a pod.
@@ -789,7 +801,7 @@ func PortForwardLocation(
 	connInfo client.ConnectionInfoGetter,
 	name string,
 	opts *api.PodPortForwardOptions,
-) (*url.URL, http.RoundTripper, error) {
+) (*url.URL, *client.ConnectionInfo, error) {
 	pod, err := getPod(ctx, getter, name)
 	if err != nil {
 		return nil, nil, err
@@ -814,7 +826,7 @@ func PortForwardLocation(
 		Path:     fmt.Sprintf("/portForward/%s/%s", pod.Namespace, pod.Name),
 		RawQuery: params.Encode(),
 	}
-	return loc, nodeInfo.Transport, nil
+	return loc, nodeInfo, nil
 }
 
 // validateContainer validate container is valid for pod, return valid container

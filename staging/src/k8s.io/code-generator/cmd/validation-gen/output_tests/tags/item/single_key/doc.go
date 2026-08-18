@@ -18,6 +18,7 @@ limitations under the License.
 // +k8s:validation-gen-scheme-registry=k8s.io/code-generator/cmd/validation-gen/testscheme.Scheme
 
 // This is a test package.
+// +k8s:validation-gen-nolint
 package singlekey
 
 import "k8s.io/code-generator/cmd/validation-gen/testscheme"
@@ -29,23 +30,39 @@ type Struct struct {
 
 	// +k8s:listType=map
 	// +k8s:listMapKey=key
-	// +k8s:item(key: "target")=+k8s:validateFalse="item Items[key=target]"
+	// +k8s:item(key: "target")=+k8s:validateFalse="item Items[key=target] 1"
+	// +k8s:item(key: "target")=+k8s:validateFalse="item Items[key=target] 2"
 	Items []Item `json:"items"`
 
 	// +k8s:listType=map
 	// +k8s:listMapKey=intField
-	// +k8s:item(intField: 42)=+k8s:validateFalse="item IntKeyItems[intField=42]"
+	// +k8s:item(intField: 42)=+k8s:validateFalse="item IntKeyItems[intField=42] 1"
+	// +k8s:item(intField: 42)=+k8s:validateFalse="item IntKeyItems[intField=42] 2"
 	IntKeyItems []IntKeyItem `json:"intKeyItems"`
 
 	// +k8s:listType=map
 	// +k8s:listMapKey=boolField
-	// +k8s:item(boolField: true)=+k8s:validateFalse="item BoolKeyItems[boolField=true]"
+	// +k8s:item(boolField: true)=+k8s:validateFalse="item BoolKeyItems[boolField=true] 1"
+	// +k8s:item(boolField: true)=+k8s:validateFalse="item BoolKeyItems[boolField=true] 2"
 	BoolKeyItems []BoolKeyItem `json:"boolKeyItems"`
 
 	// +k8s:listType=map
 	// +k8s:listMapKey=id
-	// +k8s:item(id: "typedef-target")=+k8s:validateFalse="item TypedefItems[id=typedef-target]"
+	// +k8s:item(id: "typedef-target")=+k8s:validateFalse="item TypedefItems[id=typedef-target] 1"
+	// +k8s:item(id: "typedef-target")=+k8s:validateFalse="item TypedefItems[id=typedef-target] 2"
 	TypedefItems TypedefItemList `json:"typedefItems"`
+
+	// Test atomic + unique=map + item combination
+	// +k8s:listType=atomic
+	// +k8s:unique=map
+	// +k8s:listMapKey=key
+	// +k8s:item(key: "target")=+k8s:validateFalse="item AtomicUniqueMapItems[key=target]"
+	AtomicUniqueMapItems []Item `json:"atomicUniqueMapItems"`
+
+	// +k8s:listType=map
+	// +k8s:listMapKey=key
+	// +k8s:item(key: "target-ptr")=+k8s:validateFalse="item PtrKeyItems[key=target-ptr]"
+	PtrKeyItems []PtrKeyItem `json:"ptrKeyItems"`
 }
 
 type StructWithNestedTypedef struct {
@@ -83,4 +100,9 @@ type StringAlias string
 type NestedTypedefItem struct {
 	Key  StringAlias `json:"key"`
 	Name string      `json:"name"`
+}
+
+type PtrKeyItem struct {
+	Key  *string `json:"key"`
+	Data string  `json:"data"`
 }

@@ -57,7 +57,8 @@ var pluginConfigs = []configv1.PluginConfig{
 				Kind:       "DynamicResourcesArgs",
 				APIVersion: "kubescheduler.config.k8s.io/v1",
 			},
-			FilterTimeout: &metav1.Duration{Duration: 10 * time.Second},
+			FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+			BindingTimeout: &metav1.Duration{Duration: 10 * time.Minute},
 		}},
 	},
 	{
@@ -279,7 +280,8 @@ func TestSchedulerDefaults(t *testing.T) {
 										Kind:       "DynamicResourcesArgs",
 										APIVersion: "kubescheduler.config.k8s.io/v1",
 									},
-									FilterTimeout: &metav1.Duration{Duration: 10 * time.Second},
+									FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+									BindingTimeout: &metav1.Duration{Duration: 10 * time.Minute},
 								}},
 							},
 							{
@@ -366,11 +368,12 @@ func TestSchedulerDefaults(t *testing.T) {
 									{Name: names.VolumeZone},
 									{Name: names.PodTopologySpread, Weight: ptr.To[int32](2)},
 									{Name: names.InterPodAffinity, Weight: ptr.To[int32](2)},
-									{Name: names.DynamicResources},
+									{Name: names.DynamicResources, Weight: ptr.To[int32](2)},
 									{Name: names.DefaultPreemption},
 									{Name: names.NodeResourcesBalancedAllocation, Weight: ptr.To[int32](1)},
 									{Name: names.ImageLocality, Weight: ptr.To[int32](1)},
 									{Name: names.DefaultBinder},
+									{Name: names.NodeDeclaredFeatures},
 								},
 							},
 							Bind: configv1.PluginSet{
@@ -702,9 +705,7 @@ func TestSchedulerDefaults(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			for featureName, enabled := range tc.features {
-				featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, featureName, enabled)
-			}
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, tc.features)
 			SetDefaults_KubeSchedulerConfiguration(tc.config)
 			if diff := cmp.Diff(tc.expected, tc.config); diff != "" {
 				t.Errorf("Got unexpected defaults (-want, +got):\n%s", diff)
@@ -894,14 +895,24 @@ func TestPluginArgsDefaults(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "DynamicResourcesArgs defaults, DRADeviceBindingConditions enabled",
+			features: map[featuregate.Feature]bool{
+				features.DRADeviceBindingConditions:   true,
+				features.DRAResourceClaimDeviceStatus: true,
+			},
+			in: &configv1.DynamicResourcesArgs{},
+			want: &configv1.DynamicResourcesArgs{
+				FilterTimeout:  &metav1.Duration{Duration: 10 * time.Second},
+				BindingTimeout: &metav1.Duration{Duration: 600 * time.Second},
+			},
+		},
 	}
 	for _, tc := range tests {
 		scheme := runtime.NewScheme()
 		utilruntime.Must(AddToScheme(scheme))
 		t.Run(tc.name, func(t *testing.T) {
-			for k, v := range tc.features {
-				featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, k, v)
-			}
+			featuregatetesting.SetFeatureGatesDuringTest(t, feature.DefaultFeatureGate, tc.features)
 			scheme.Default(tc.in)
 			if diff := cmp.Diff(tc.want, tc.in); diff != "" {
 				t.Errorf("Got unexpected defaults (-want, +got):\n%s", diff)

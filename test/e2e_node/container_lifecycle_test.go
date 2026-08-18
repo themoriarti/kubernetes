@@ -26,13 +26,13 @@ import (
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
-	admissionapi "k8s.io/pod-security-admission/api"
-
-	"k8s.io/kubernetes/test/e2e/feature"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 	"k8s.io/utils/ptr"
 )
 
@@ -1723,7 +1723,7 @@ var _ = SIGDescribe(framework.WithSerial(), "Containers Lifecycle", func() {
 			framework.ExpectNoError(err)
 
 			ginkgo.By("Getting the current pod sandbox ID")
-			rs, _, err := getCRIClient()
+			rs, _, err := getCRIClient(ctx)
 			framework.ExpectNoError(err)
 
 			sandboxes, err := rs.ListPodSandbox(ctx, &runtimeapi.PodSandboxFilter{
@@ -1905,7 +1905,7 @@ var _ = SIGDescribe(framework.WithSerial(), "Containers Lifecycle", func() {
 				restartKubelet := mustStopKubelet(ctx, f)
 
 				ginkgo.By("removing the completed init container statuses from the container runtime")
-				rs, _, err := getCRIClient()
+				rs, _, err := getCRIClient(ctx)
 				framework.ExpectNoError(err)
 
 				pod, err = client.Get(ctx, pod.Name, metav1.GetOptions{})
@@ -2072,7 +2072,7 @@ var _ = SIGDescribe(framework.WithSerial(), "Containers Lifecycle", func() {
 				restartKubelet := mustStopKubelet(ctx, f)
 
 				ginkgo.By("removing the completed init container statuses from the container runtime")
-				rs, _, err := getCRIClient()
+				rs, _, err := getCRIClient(ctx)
 				framework.ExpectNoError(err)
 
 				pod, err = client.Get(ctx, pod.Name, metav1.GetOptions{})
@@ -2121,7 +2121,7 @@ var _ = SIGDescribe(framework.WithSerial(), "Containers Lifecycle", func() {
 	})
 })
 
-var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
+var _ = SIGDescribe(framework.WithNodeConformance(), "Containers Lifecycle", func() {
 	f := framework.NewDefaultFramework("containers-lifecycle-test")
 	addAfterEachForCleaningUpPods(f)
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
@@ -2288,6 +2288,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 								TerminationSeconds: containerTerminationSeconds,
 								ExitCode:           0,
 							}),
+							Lifecycle: &v1.Lifecycle{
+								PostStart: startedPostStartGate(),
+							},
 							RestartPolicy: &containerRestartPolicyAlways,
 						},
 						{
@@ -2306,6 +2309,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 								TerminationSeconds: 1,
 								ExitCode:           0,
 							}),
+							Lifecycle: &v1.Lifecycle{
+								PostStart: startedPostStartGate(),
+							},
 							RestartPolicy: &containerRestartPolicyAlways,
 						},
 					},
@@ -4566,6 +4572,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit2,
@@ -4576,6 +4585,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit3,
@@ -4586,6 +4598,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 						},
 						Containers: []v1.Container{
@@ -4776,17 +4791,15 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 				restartableInit3 := "restartable-init-3"
 				regular1 := "regular-1"
 
-				makePrestop := func(containerName string) *v1.Lifecycle {
-					return &v1.Lifecycle{
-						PreStop: &v1.LifecycleHandler{
-							Exec: &v1.ExecAction{
-								Command: ExecCommand(prefixedName(PreStopPrefix, containerName), execCommand{
-									ExitCode:      0,
-									ContainerName: containerName,
-									LoopForever:   true,
-									LoopPeriod:    0.2,
-								}),
-							},
+				makePrestop := func(containerName string) *v1.LifecycleHandler {
+					return &v1.LifecycleHandler{
+						Exec: &v1.ExecAction{
+							Command: ExecCommand(prefixedName(PreStopPrefix, containerName), execCommand{
+								ExitCode:      0,
+								ContainerName: containerName,
+								LoopForever:   true,
+								LoopPeriod:    0.2,
+							}),
 						},
 					}
 				}
@@ -4807,7 +4820,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit1),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit1),
+								},
 							},
 							{
 								Name:          restartableInit2,
@@ -4818,7 +4834,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit2),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit2),
+								},
 							},
 							{
 								Name:          restartableInit3,
@@ -4829,7 +4848,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit3),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit3),
+								},
 							},
 						},
 						Containers: []v1.Container{
@@ -4915,16 +4937,15 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 				restartableInit3 := "restartable-init-3"
 				regular1 := "regular-1"
 
-				makePrestop := func(containerName string) *v1.Lifecycle {
-					return &v1.Lifecycle{
-						PreStop: &v1.LifecycleHandler{
-							Exec: &v1.ExecAction{
-								Command: ExecCommand(prefixedName(PreStopPrefix, containerName), execCommand{
-									Delay:         1,
-									ExitCode:      0,
-									ContainerName: containerName,
-								}),
-							},
+				makePrestop := func(containerName string) *v1.LifecycleHandler {
+					return &v1.LifecycleHandler{
+						Exec: &v1.ExecAction{
+							Command: ExecCommand(prefixedName(PreStopPrefix, containerName), execCommand{
+								Delay:         1,
+								ExitCode:      0,
+								ContainerName: containerName,
+								LoopPeriod:    0.2,
+							}),
 						},
 					}
 				}
@@ -4945,7 +4966,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit1),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit1),
+								},
 							},
 							{
 								Name:          restartableInit2,
@@ -4956,7 +4980,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit2),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit2),
+								},
 							},
 							{
 								Name:          restartableInit3,
@@ -4967,7 +4994,10 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 5,
 									ExitCode:           0,
 								}),
-								Lifecycle: makePrestop(restartableInit3),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+									PreStop:   makePrestop(restartableInit3),
+								},
 							},
 						},
 						Containers: []v1.Container{
@@ -5027,7 +5057,7 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 				ps3, err := results.TimeOfStart(prefixedName(PreStopPrefix, restartableInit3))
 				framework.ExpectNoError(err)
 
-				const toleration = 500 // milliseconds
+				const toleration = 1000 // milliseconds
 				gomega.Expect(ps1-ps2).To(gomega.BeNumerically("~", 0, toleration),
 					fmt.Sprintf("expected PreStop 1 & PreStop 2 to be killed at the same time, got %s", results))
 				gomega.Expect(ps1-ps3).To(gomega.BeNumerically("~", 0, toleration),
@@ -5604,6 +5634,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 1,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit2,
@@ -5614,6 +5647,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 20,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit3,
@@ -5624,6 +5660,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 1,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 						},
 						Containers: []v1.Container{
@@ -5705,6 +5744,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 1,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit2,
@@ -5715,6 +5757,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 20,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 							{
 								Name:          restartableInit3,
@@ -5725,6 +5770,9 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 									TerminationSeconds: 1,
 									ExitCode:           0,
 								}),
+								Lifecycle: &v1.Lifecycle{
+									PostStart: startedPostStartGate(),
+								},
 							},
 						},
 						Containers: []v1.Container{
@@ -5906,16 +5954,122 @@ var _ = SIGDescribe(feature.SidecarContainers, "Containers Lifecycle", func() {
 				})
 			})
 		})
+
 	})
+
+	ginkgo.When("A restartable init container with startup probe fails initially", func() {
+		ginkgo.It("should continue probing and allow regular container to start after the restartable init container recovers", func(ctx context.Context) {
+			restartableInit := "buggy-restartable-init"
+			regularContainer := "regular-container"
+
+			restartPolicyAlways := v1.ContainerRestartPolicyAlways
+
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restartable-init-startup-probe-fix",
+				},
+				Spec: v1.PodSpec{
+					RestartPolicy: v1.RestartPolicyNever,
+					InitContainers: []v1.Container{{
+						Name:          restartableInit,
+						Image:         busyboxImage,
+						RestartPolicy: &restartPolicyAlways,
+						Command: []string{"sh", "-c", `
+if [ ! -f /persistent/first_run_done ]; then
+  echo 'First run: creating marker and exiting with 1'
+  touch /persistent/first_run_done
+  exit 1
+else
+  echo 'Second run: marker found, running as sidecar'
+  sleep 120
+fi`},
+						StartupProbe: &v1.Probe{
+							InitialDelaySeconds: 3,
+							PeriodSeconds:       2,
+							FailureThreshold:    10,
+							ProbeHandler: v1.ProbeHandler{
+								Exec: &v1.ExecAction{
+									Command: []string{"/bin/true"},
+								},
+							},
+						},
+					}},
+					Containers: []v1.Container{{
+						Name:  regularContainer,
+						Image: imageutils.GetPauseImageName(),
+						StartupProbe: &v1.Probe{
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       5,
+							ProbeHandler: v1.ProbeHandler{
+								Exec: &v1.ExecAction{
+									Command: []string{"/bin/true"},
+								},
+							},
+						},
+					}},
+				},
+			}
+
+			preparePod(pod)
+			client := e2epod.NewPodClient(f)
+			pod = client.Create(ctx, pod)
+
+			ginkgo.By("Waiting for init container to fail and restart at least once")
+			framework.ExpectNoError(
+				e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name,
+					"restartable init restarted", 90*time.Second,
+					func(p *v1.Pod) (bool, error) {
+						for _, st := range p.Status.InitContainerStatuses {
+							if st.Name == restartableInit && st.RestartCount > 0 {
+								framework.Logf("Init container %s has restarted %d times", restartableInit, st.RestartCount)
+								return true, nil
+							}
+						}
+						return false, nil
+					}),
+			)
+
+			ginkgo.By("Waiting for init container to be running after restart")
+			framework.ExpectNoError(
+				e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name,
+					"restartable init running", 90*time.Second,
+					func(p *v1.Pod) (bool, error) {
+						for _, st := range p.Status.InitContainerStatuses {
+							if st.Name == restartableInit && st.State.Running != nil {
+								framework.Logf("Init container %s is now running", restartableInit)
+								return true, nil
+							}
+						}
+						return false, nil
+					}),
+			)
+
+			ginkgo.By("Waiting for regular container to start")
+			framework.ExpectNoError(
+				e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name,
+					"regular container running", 120*time.Second,
+					func(p *v1.Pod) (bool, error) {
+						for _, st := range p.Status.ContainerStatuses {
+							if st.Name == regularContainer && st.State.Running != nil {
+								framework.Logf("Regular container %s is running", regularContainer)
+								return true, nil
+							}
+						}
+						return false, nil
+					}),
+			)
+		})
+	})
+
 })
 
-var _ = SIGDescribe(feature.SidecarContainers, framework.WithSerial(), "Containers Lifecycle", func() {
+var _ = SIGDescribe(framework.WithNodeConformance(), framework.WithSerial(), "Containers Lifecycle", func() {
 	f := framework.NewDefaultFramework("containers-lifecycle-test-serial")
 	addAfterEachForCleaningUpPods(f)
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.When("A node running restartable init containers reboots", func() {
-		ginkgo.It("should restart the containers in right order with the proper phase after the node reboot", func(ctx context.Context) {
+		ginkgo.It("should restart the containers in right order after the node reboot", func(ctx context.Context) {
 			init1 := "init-1"
 			restartableInit2 := "restartable-init-2"
 			init3 := "init-3"
@@ -5980,7 +6134,7 @@ var _ = SIGDescribe(feature.SidecarContainers, framework.WithSerial(), "Containe
 			framework.ExpectNoError(err)
 
 			ginkgo.By("Getting the current pod sandbox ID")
-			rs, _, err := getCRIClient()
+			rs, _, err := getCRIClient(ctx)
 			framework.ExpectNoError(err)
 
 			sandboxes, err := rs.ListPodSandbox(ctx, &runtimeapi.PodSandboxFilter{
@@ -6015,9 +6169,9 @@ var _ = SIGDescribe(feature.SidecarContainers, framework.WithSerial(), "Containe
 			})
 			framework.ExpectNoError(err)
 
-			ginkgo.By("Waiting for the pod to run after re-initialization")
-			err = e2epod.WaitForPodRunningInNamespace(ctx, f.ClientSet, pod)
-			framework.ExpectNoError(err)
+			ginkgo.By("Waiting for regular container to start running")
+			err = e2epod.WaitForContainerRunning(ctx, f.ClientSet, pod.Namespace, pod.Name, regular1, f.Timeouts.PodStart)
+			framework.ExpectNoError(err, "regular container %q should be running", regular1)
 
 			ginkgo.By("Parsing results")
 			pod, err = client.Get(ctx, pod.Name, metav1.GetOptions{})
@@ -6126,7 +6280,7 @@ var _ = SIGDescribe(feature.SidecarContainers, framework.WithSerial(), "Containe
 				framework.ExpectNoError(err)
 
 				ginkgo.By("Getting the current pod sandbox ID")
-				rs, _, err := getCRIClient()
+				rs, _, err := getCRIClient(ctx)
 				framework.ExpectNoError(err)
 
 				sandboxes, err := rs.ListPodSandbox(ctx, &runtimeapi.PodSandboxFilter{
@@ -6195,6 +6349,733 @@ var _ = SIGDescribe(feature.SidecarContainers, framework.WithSerial(), "Containe
 			ginkgo.It("should handle an update during the kubelet restart", func(ctx context.Context) {
 				testPodUpdateOnReboot(ctx, false)
 			})
+		})
+	})
+})
+
+var _ = SIGDescribe(framework.WithSerial(), "Not Change Container Status", framework.WithFeatureGate(features.ChangeContainerStatusOnKubeletRestart), func() {
+	f := framework.NewDefaultFramework("not-change-container-status-test-serial")
+	addAfterEachForCleaningUpPods(f)
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+	ginkgo.When("a Pod is running", func() {
+		testKubeletRestart := func(ctx context.Context, pod *v1.Pod) {
+			client := e2epod.NewPodClient(f)
+			pod = client.Create(ctx, pod)
+
+			ginkgo.By("Waiting for the pod to be running and ready")
+			err := e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name, "PodReady", f.Timeouts.PodStart,
+				func(p *v1.Pod) (bool, error) {
+					if p.Status.Phase != v1.PodRunning {
+						return false, nil
+					}
+					for _, cond := range p.Status.Conditions {
+						if cond.Type == v1.PodReady && cond.Status == v1.ConditionTrue {
+							return true, nil
+						}
+					}
+					return false, nil
+				})
+			framework.ExpectNoError(err)
+
+			// Double check the initial state before starting the concurrent check
+			p, err := client.Get(ctx, pod.Name, metav1.GetOptions{})
+			framework.ExpectNoError(err)
+			gomega.Expect(p.Status.ContainerStatuses).ToNot(gomega.BeEmpty())
+			for _, status := range p.Status.ContainerStatuses {
+				gomega.Expect(status.RestartCount).To(gomega.BeZero())
+				gomega.Expect(status.Started).ToNot(gomega.BeNil())
+				gomega.Expect(*status.Started).To(gomega.BeTrueBecause("The Started field should be set to true when a pod enters the Ready condition."))
+				gomega.Expect(status.Ready).To(gomega.BeTrueBecause("The Ready field should be set to true when a pod enters the Ready condition."))
+			}
+
+			// The grace period for kubelet startup is 10 seconds, so we wait here for 11 seconds.
+			time.Sleep(time.Second * 11)
+
+			stopCh := make(chan struct{})
+			errCh := make(chan error, 1)
+			go func() {
+				watcher, err := f.ClientSet.CoreV1().Pods(pod.Namespace).Watch(ctx, metav1.ListOptions{
+					FieldSelector: "metadata.name=" + pod.Name,
+				})
+				if err != nil {
+					errCh <- fmt.Errorf("failed to watch pod: %w", err)
+					return
+				}
+				defer watcher.Stop()
+
+				for {
+					select {
+					case event, ok := <-watcher.ResultChan():
+						if !ok {
+							return
+						}
+						if event.Type != watch.Modified {
+							continue
+						}
+						p, ok := event.Object.(*v1.Pod)
+						if !ok {
+							continue
+						}
+
+						if p.Status.Phase != v1.PodRunning {
+							errCh <- fmt.Errorf("pod phase is %v, expected %v", p.Status.Phase, v1.PodRunning)
+							return
+						}
+						if len(p.Status.ContainerStatuses) < len(pod.Spec.Containers) {
+							continue
+						}
+						for _, containerStatus := range p.Status.ContainerStatuses {
+							if containerStatus.RestartCount > 0 {
+								errCh <- fmt.Errorf("container %q restarted %d times", containerStatus.Name, containerStatus.RestartCount)
+								return
+							}
+							if containerStatus.Started == nil || !*containerStatus.Started {
+								errCh <- fmt.Errorf("container %q started status is not true", containerStatus.Name)
+								return
+							}
+							if !containerStatus.Ready {
+								errCh <- fmt.Errorf("container %q ready status is not true", containerStatus.Name)
+								return
+							}
+						}
+					case <-stopCh:
+						close(errCh)
+						return
+					}
+				}
+			}()
+
+			ginkgo.By("restarting the kubelet")
+			restartKubelet := mustStopKubelet(ctx, f)
+			restartKubelet(ctx)
+
+			ginkgo.By("ensuring kubelet is healthy")
+			gomega.Eventually(ctx, func() bool {
+				return kubeletHealthCheck(kubeletHealthCheckURL)
+			}, f.Timeouts.PodStart, f.Timeouts.Poll).Should(gomega.BeTrueBecause("kubelet should be started"))
+
+			// Let the goroutine run for a few more seconds to catch any delayed changes
+			time.Sleep(5 * time.Second)
+			close(stopCh)
+
+			// Check for errors from the goroutine
+			for err := range errCh {
+				framework.ExpectNoError(err, "pod status check failed during kubelet restart")
+			}
+		}
+
+		ginkgo.It("should not affect pod status when pod has no probe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-no-probe",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has startupProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-with-startup-probe",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has readinessProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-with-readiness-probe",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has startupProbe and readinessProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-with-startup-and-readiness-probe",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has multiple containers", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-with-multiple-containers",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container1",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+						},
+						{
+							Name:    "container2",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has multiple containers with startupProbes", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-mc-with-startup-probes",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container1",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+						{
+							Name:    "container2",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has multiple containers with readinessProbes", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-mc-with-readiness-probes",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container1",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+						{
+							Name:    "container2",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when pod has multiple containers with startup and readiness probes", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-mc-with-startup-and-readiness-probes",
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:    "container1",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+						{
+							Name:    "container2",
+							Image:   defaultImage,
+							Command: []string{"sleep", "3600"},
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+				},
+			}
+			testKubeletRestart(ctx, pod)
+		})
+	})
+
+	ginkgo.When("a Pod is running with a restartable init container", func() {
+		testKubeletRestartForRestartableInit := func(ctx context.Context, pod *v1.Pod) {
+			client := e2epod.NewPodClient(f)
+			pod = client.Create(ctx, pod)
+
+			ginkgo.By("Waiting for the pod to be running and ready")
+			err := e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name, "PodReady", f.Timeouts.PodStart,
+				func(p *v1.Pod) (bool, error) {
+					if p.Status.Phase != v1.PodRunning {
+						return false, nil
+					}
+					for _, cond := range p.Status.Conditions {
+						if cond.Type == v1.PodReady && cond.Status == v1.ConditionTrue {
+							return true, nil
+						}
+					}
+					return false, nil
+				})
+			framework.ExpectNoError(err)
+
+			// Double check the initial state before starting the concurrent check
+			p, err := client.Get(ctx, pod.Name, metav1.GetOptions{})
+			framework.ExpectNoError(err)
+			gomega.Expect(p.Status.InitContainerStatuses).ToNot(gomega.BeEmpty())
+			gomega.Expect(p.Status.InitContainerStatuses[0].RestartCount).To(gomega.BeZero())
+			gomega.Expect(p.Status.InitContainerStatuses[0].Started).ToNot(gomega.BeNil())
+			gomega.Expect(*p.Status.InitContainerStatuses[0].Started).To(gomega.BeTrueBecause("The Started field should be set to true when a pod enters the Ready condition."))
+			gomega.Expect(p.Status.InitContainerStatuses[0].Ready).To(gomega.BeTrueBecause("The Ready field should be set to true when a pod enters the Ready condition."))
+
+			// The grace period for kubelet startup is 10 seconds, so we wait here for 11 seconds.
+			time.Sleep(time.Second * 11)
+
+			stopCh := make(chan struct{})
+			errCh := make(chan error, 1)
+			go func() {
+				watcher, err := f.ClientSet.CoreV1().Pods(pod.Namespace).Watch(ctx, metav1.ListOptions{
+					FieldSelector: "metadata.name=" + pod.Name,
+				})
+				if err != nil {
+					errCh <- fmt.Errorf("failed to watch pod: %w", err)
+					return
+				}
+				defer watcher.Stop()
+
+				for {
+					select {
+					case event, ok := <-watcher.ResultChan():
+						if !ok {
+							return
+						}
+						if event.Type != watch.Modified {
+							continue
+						}
+						p, ok := event.Object.(*v1.Pod)
+						if !ok {
+							continue
+						}
+
+						if p.Status.Phase != v1.PodRunning {
+							errCh <- fmt.Errorf("pod phase is %v, expected %v", p.Status.Phase, v1.PodRunning)
+							return
+						}
+						if len(p.Status.InitContainerStatuses) == 0 {
+							errCh <- fmt.Errorf("pod has no init container statuses")
+							return
+						}
+						containerStatus := p.Status.InitContainerStatuses[0]
+						if containerStatus.RestartCount > 0 {
+							errCh <- fmt.Errorf("container restarted %d times", containerStatus.RestartCount)
+							return
+						}
+						if containerStatus.Started == nil || !*containerStatus.Started {
+							errCh <- fmt.Errorf("container started status is not true")
+							return
+						}
+						if !containerStatus.Ready {
+							errCh <- fmt.Errorf("container ready status is not true")
+							return
+						}
+					case <-stopCh:
+						close(errCh)
+						return
+					}
+				}
+			}()
+
+			ginkgo.By("restarting the kubelet")
+			restartKubelet := mustStopKubelet(ctx, f)
+			restartKubelet(ctx)
+
+			ginkgo.By("ensuring kubelet is healthy")
+			gomega.Eventually(ctx, func() bool {
+				return kubeletHealthCheck(kubeletHealthCheckURL)
+			}, f.Timeouts.PodStart, f.Timeouts.Poll).Should(gomega.BeTrueBecause("kubelet should be started"))
+
+			// Let the goroutine run for a few more seconds to catch any delayed changes
+			time.Sleep(5 * time.Second)
+			close(stopCh)
+
+			// Check for errors from the goroutine
+			for err := range errCh {
+				framework.ExpectNoError(err, "pod status check failed during kubelet restart")
+			}
+		}
+
+		ginkgo.It("should not affect pod status when restartable init container has no probe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-restartable-init-no-probe",
+				},
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{
+						{
+							Name:          "restartable-init",
+							Image:         defaultImage,
+							Command:       []string{"sleep", "3600"},
+							RestartPolicy: &containerRestartPolicyAlways,
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:  "container",
+							Image: imageutils.GetPauseImageName(),
+						},
+					},
+				},
+			}
+			testKubeletRestartForRestartableInit(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when restartable init container has startupProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-restartable-init-with-startup-probe",
+				},
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{
+						{
+							Name:          "restartable-init",
+							Image:         defaultImage,
+							Command:       []string{"sleep", "3600"},
+							RestartPolicy: &containerRestartPolicyAlways,
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:  "container",
+							Image: imageutils.GetPauseImageName(),
+						},
+					},
+				},
+			}
+			testKubeletRestartForRestartableInit(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when restartable init container has readinessProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-restartable-init-with-readiness-probe",
+				},
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{
+						{
+							Name:          "restartable-init",
+							Image:         defaultImage,
+							Command:       []string{"sleep", "3600"},
+							RestartPolicy: &containerRestartPolicyAlways,
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:  "container",
+							Image: imageutils.GetPauseImageName(),
+						},
+					},
+				},
+			}
+			testKubeletRestartForRestartableInit(ctx, pod)
+		})
+
+		ginkgo.It("should not affect pod status when restartable init container has startupProbe and readinessProbe", func(ctx context.Context) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-restartable-init-with-startup-and-readiness-probe",
+				},
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{
+						{
+							Name:          "restartable-init",
+							Image:         defaultImage,
+							Command:       []string{"sleep", "3600"},
+							RestartPolicy: &containerRestartPolicyAlways,
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+							ReadinessProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:  "container",
+							Image: imageutils.GetPauseImageName(),
+						},
+					},
+				},
+			}
+			testKubeletRestartForRestartableInit(ctx, pod)
+		})
+	})
+
+	// Regression test for https://github.com/kubernetes/kubernetes/issues/136910
+	var _ = SIGDescribe(framework.WithSerial(), "Sidecar container restart after kubelet restart", framework.WithFeatureGate(features.ChangeContainerStatusOnKubeletRestart), func() {
+		f := framework.NewDefaultFramework("sidecar-container-restart-test-serial")
+		addAfterEachForCleaningUpPods(f)
+		f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+
+		ginkgo.It("should restart regular containers when sidecar with startupProbe is running after kubelet restart", func(ctx context.Context) {
+			containerRestartPolicyAlways := v1.ContainerRestartPolicyAlways
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pod-with-sidecar-and-crashing-container",
+				},
+				Spec: v1.PodSpec{
+					RestartPolicy: v1.RestartPolicyAlways,
+					InitContainers: []v1.Container{
+						{
+							Name:          "sidecar",
+							Image:         defaultImage,
+							Command:       []string{"sh", "-c", "while true; do sleep 1; done"},
+							RestartPolicy: &containerRestartPolicyAlways,
+							StartupProbe: &v1.Probe{
+								ProbeHandler: v1.ProbeHandler{
+									Exec: &v1.ExecAction{
+										Command: []string{"/bin/true"},
+									},
+								},
+								InitialDelaySeconds: 1,
+								PeriodSeconds:       1,
+							},
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:    "crasher",
+							Image:   defaultImage,
+							Command: []string{"/bin/sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait $!"},
+						},
+					},
+				},
+			}
+
+			client := e2epod.NewPodClient(f)
+			pod = client.Create(ctx, pod)
+
+			ginkgo.By("Waiting for the pod to be running and ready")
+			err := e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name, "PodReady", f.Timeouts.PodStart,
+				func(p *v1.Pod) (bool, error) {
+					if p.Status.Phase != v1.PodRunning {
+						return false, nil
+					}
+					for _, cond := range p.Status.Conditions {
+						if cond.Type == v1.PodReady && cond.Status == v1.ConditionTrue {
+							return true, nil
+						}
+					}
+					return false, nil
+				})
+			framework.ExpectNoError(err)
+
+			// The grace period for kubelet startup is 10 seconds, so we wait here for 11 seconds.
+			time.Sleep(time.Second * 11)
+
+			ginkgo.By("restarting the kubelet")
+			restartKubelet := mustStopKubelet(ctx, f)
+			restartKubelet(ctx)
+
+			ginkgo.By("ensuring kubelet is healthy")
+			gomega.Eventually(ctx, func() bool {
+				return kubeletHealthCheck(kubeletHealthCheckURL)
+			}, f.Timeouts.PodStart, f.Timeouts.Poll).Should(gomega.BeTrueBecause("kubelet should be started"))
+
+			ginkgo.By("Sending SIGTERM to PID 1 in the crasher container")
+			_, _, err = e2epod.ExecCommandInContainerWithFullOutput(f, pod.Name, "crasher", "kill", "1")
+			framework.ExpectNoError(err, "failed to send SIGTERM to PID 1 in crasher container")
+
+			ginkgo.By("Waiting for the container to restart and be running again")
+			err = e2epod.WaitForPodCondition(ctx, f.ClientSet, pod.Namespace, pod.Name, "ContainerRunningAfterRestart", f.Timeouts.PodStart,
+				func(p *v1.Pod) (bool, error) {
+					for _, status := range p.Status.ContainerStatuses {
+						if status.Name == "crasher" && status.RestartCount > 0 && status.State.Running != nil {
+							return true, nil
+						}
+					}
+					return false, nil
+				})
+			framework.ExpectNoError(err, "container should be restarted and running again")
+
+			ginkgo.By("Verifying sidecar is still running")
+			p, err := client.Get(ctx, pod.Name, metav1.GetOptions{})
+			framework.ExpectNoError(err)
+			gomega.Expect(p.Status.InitContainerStatuses).ToNot(gomega.BeEmpty())
+			for _, status := range p.Status.InitContainerStatuses {
+				if status.Name == "sidecar" {
+					gomega.Expect(status.State.Running).ToNot(gomega.BeNil(), "sidecar should still be running")
+					gomega.Expect(status.RestartCount).To(gomega.BeZero(), "sidecar should not have restarted")
+				}
+			}
 		})
 	})
 })

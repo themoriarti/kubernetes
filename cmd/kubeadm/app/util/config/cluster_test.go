@@ -18,6 +18,7 @@ package config
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,120 +76,25 @@ kind: KubeletConfiguration
 `),
 }
 
-var kubeletConfFiles = map[string][]byte{
-	"withoutX509Cert": []byte(`
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://10.0.2.15:6443
-    name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: system:node:mynode
-  name: system:node:mynode@kubernetes
-current-context: system:node:mynode@kubernetes
-kind: Config
-users:
-- name: system:node:mynode
-  user:
-`),
-	"configWithEmbeddedCert": []byte(`
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://10.0.2.15:6443
-  name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: system:node:mynode
-  name: system:node:mynode@kubernetes
-current-context: system:node:mynode@kubernetes
-kind: Config
-users:
-- name: system:node:mynode
-  user:
-      client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM4akNDQWRxZ0F3SUJBZ0lJQWl3VURhYk5vZ1F3RFFZSktvWklodmNOQVFFTEJRQXdGVEVUTUJFR0ExVUUKQXhNS2EzVmlaWEp1WlhSbGN6QWVGdzB4T0RBNU1ERXhOVE14TWpaYUZ3MHhPVEE1TURFeE5qQXhOVGxhTURReApGVEFUQmdOVkJBb1RESE41YzNSbGJUcHViMlJsY3pFYk1Ca0dBMVVFQXhNU2MzbHpkR1Z0T201dlpHVTZiWGx1CmIyUmxNSUlCSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQVE4QU1JSUJDZ0tDQVFFQWs2UXUzeStyNEZYUzZ4VkoKWU1vNE9kSkt3R1d1MHY4TEJIUnhhOUhvVHo1RXZLQnB1OVJoemt5dStUaFczb0xta2ZTRmNJcitHa0M5MW0zOApFelRmVE5JY2dsL0V5YkpmR1QvdGdUazZYd1kxY1UrUUdmSEFNNTBCVzFXTFVHc25CSllJZjA5eENnZTVoTkxLCnREeUJOWWNQZzg1bUJpOU9CNFJ2UlgyQVFRMjJwZ0xrQUpJWklOU0FEdUFrODN2b051SXM2YVY2bHBkR2Vva3YKdDlpTFdNR3p3a3ZTZUZQTlNGeWZ3Q055eENjb1FDQUNtSnJRS3NoeUE2bWNzdVhORWVXdlRQdVVFSWZPVFl4dwpxdkszRVBOK0xUYlA2anhUMWtTcFJUOSt4Z29uSlFhU0RsbUNBd20zRGJkSVppWUt3R2ppMkxKL0kvYWc0cTlzCjNLb0J2UUlEQVFBQm95Y3dKVEFPQmdOVkhROEJBZjhFQkFNQ0JhQXdFd1lEVlIwbEJBd3dDZ1lJS3dZQkJRVUgKQXdJd0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFLcVVrU21jdW85OG5EK015b005VFdEV0pyTndySXpQTUNqRQpCSkdyREhVaHIwcEZlRjc0RHViODNzRXlaNjFxNUVQd2Y0enNLSzdzdDRUTzZhcE9pZWJYVmN3dnZoa09HQ2dFCmFVdGNOMjFhUGxtU0tOd0c4ai8yK3ZhbU80bGplK1NnZzRUUVB0eDZWejh5VXN2RFhxSUZycjNNd1gzSDA1RW4KWXAzN05JYkhKbGxHUW5LVHA5aTg5aXF4WXVhSERqZldiVHlEY3B5NldNVjdVaFYvY1plc3lGL0NBamNHd1V6YgowRlo5bW5tMnFONlBGWHZ4RmdMSGFWZzN2SVVCbkNmVVVyY1BDNE94VFNPK21aUmUxazh3eUFpVWovSk0rZllvCkcrMi9sbThUYVZqb1U3Rmk1S2E1RzVIWTJHTGFSN1ArSXhZY3JNSENsNjJZN1JxY3JuYz0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
-`),
-	"configWithLinkedCert": []byte(`
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://10.0.2.15:6443
-  name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: system:node:mynode
-  name: system:node:mynode@kubernetes
-current-context: system:node:mynode@kubernetes
-kind: Config
-users:
-- name: system:node:mynode
-  user:
-      client-certificate: kubelet.pem
-`),
-	"configWithInvalidContext": []byte(`
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://10.0.2.15:6443
-  name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: system:node:mynode
-  name: system:node:mynode@kubernetes
-current-context: invalidContext
-kind: Config
-users:
-- name: system:node:mynode
-  user:
-      client-certificate: kubelet.pem
-`),
-	"configWithInvalidUser": []byte(`
-apiVersion: v1
-clusters:
-- cluster:
-    server: https://10.0.2.15:6443
-  name: kubernetes
-contexts:
-- context:
-    cluster: kubernetes
-    user: invalidUser
-  name: system:node:mynode@kubernetes
-current-context: system:node:mynode@kubernetes
-kind: Config
-users:
-- name: system:node:mynode
-  user:
-      client-certificate: kubelet.pem
-`),
-}
+var (
+	//go:embed testdata/kubelet-without-cert.yaml
+	configWithoutCert []byte
 
-var pemFiles = map[string][]byte{
-	"mynode.pem": []byte(`
------BEGIN CERTIFICATE-----
-MIIC8jCCAdqgAwIBAgIIAiwUDabNogQwDQYJKoZIhvcNAQELBQAwFTETMBEGA1UE
-AxMKa3ViZXJuZXRlczAeFw0xODA5MDExNTMxMjZaFw0xOTA5MDExNjAxNTlaMDQx
-FTATBgNVBAoTDHN5c3RlbTpub2RlczEbMBkGA1UEAxMSc3lzdGVtOm5vZGU6bXlu
-b2RlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk6Qu3y+r4FXS6xVJ
-YMo4OdJKwGWu0v8LBHRxa9HoTz5EvKBpu9Rhzkyu+ThW3oLmkfSFcIr+GkC91m38
-EzTfTNIcgl/EybJfGT/tgTk6XwY1cU+QGfHAM50BW1WLUGsnBJYIf09xCge5hNLK
-tDyBNYcPg85mBi9OB4RvRX2AQQ22pgLkAJIZINSADuAk83voNuIs6aV6lpdGeokv
-t9iLWMGzwkvSeFPNSFyfwCNyxCcoQCACmJrQKshyA6mcsuXNEeWvTPuUEIfOTYxw
-qvK3EPN+LTbP6jxT1kSpRT9+xgonJQaSDlmCAwm3DbdIZiYKwGji2LJ/I/ag4q9s
-3KoBvQIDAQABoycwJTAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUH
-AwIwDQYJKoZIhvcNAQELBQADggEBAKqUkSmcuo98nD+MyoM9TWDWJrNwrIzPMCjE
-BJGrDHUhr0pFeF74Dub83sEyZ61q5EPwf4zsKK7st4TO6apOiebXVcwvvhkOGCgE
-aUtcN21aPlmSKNwG8j/2+vamO4lje+Sgg4TQPtx6Vz8yUsvDXqIFrr3MwX3H05En
-Yp37NIbHJllGQnKTp9i89iqxYuaHDjfWbTyDcpy6WMV7UhV/cZesyF/CAjcGwUzb
-0FZ9mnm2qN6PFXvxFgLHaVg3vIUBnCfUUrcPC4OxTSO+mZRe1k8wyAiUj/JM+fYo
-G+2/lm8TaVjoU7Fi5Ka5G5HY2GLaR7P+IxYcrMHCl62Y7Rqcrnc=
------END CERTIFICATE-----
-`),
-}
+	//go:embed testdata/kubelet-with-embedded-cert.yaml
+	configWithEmbeddedCert []byte
+
+	//go:embed testdata/kubelet-with-linked-cert.yaml
+	configWithLinkedCert []byte
+
+	//go:embed testdata/kubelet-with-invalid-context.yaml
+	configWithInvalidContext []byte
+
+	//go:embed testdata/kubelet-with-invalid-user.yaml
+	configWithInvalidUser []byte
+)
+
+//go:embed testdata/mynode.pem
+var mynodePem []byte
 
 func TestGetNodeNameFromKubeletConfig(t *testing.T) {
 	tmpdir, err := os.MkdirTemp("", "")
@@ -205,31 +111,31 @@ func TestGetNodeNameFromKubeletConfig(t *testing.T) {
 	}{
 		{
 			name:              "valid - with embedded cert",
-			kubeconfigContent: kubeletConfFiles["configWithEmbeddedCert"],
+			kubeconfigContent: configWithEmbeddedCert,
 		},
 		{
 			name:              "invalid - linked cert missing",
-			kubeconfigContent: kubeletConfFiles["configWithLinkedCert"],
+			kubeconfigContent: configWithLinkedCert,
 			expectedError:     true,
 		},
 		{
 			name:              "valid - with linked cert",
-			kubeconfigContent: kubeletConfFiles["configWithLinkedCert"],
-			pemContent:        pemFiles["mynode.pem"],
+			kubeconfigContent: configWithLinkedCert,
+			pemContent:        mynodePem,
 		},
 		{
 			name:              "invalid - without embedded or linked X509Cert",
-			kubeconfigContent: kubeletConfFiles["withoutX509Cert"],
+			kubeconfigContent: configWithoutCert,
 			expectedError:     true,
 		},
 		{
 			name:              "invalid - the current context is invalid",
-			kubeconfigContent: kubeletConfFiles["configWithInvalidContext"],
+			kubeconfigContent: configWithInvalidContext,
 			expectedError:     true,
 		},
 		{
 			name:              "invalid - the user of the current context is invalid",
-			kubeconfigContent: kubeletConfFiles["configWithInvalidUser"],
+			kubeconfigContent: configWithInvalidUser,
 			expectedError:     true,
 		},
 	}
@@ -288,7 +194,7 @@ func TestGetNodeRegistration(t *testing.T) {
 		},
 		{
 			name:         "valid",
-			fileContents: kubeletConfFiles["configWithEmbeddedCert"],
+			fileContents: configWithEmbeddedCert,
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: nodeName,
@@ -303,7 +209,7 @@ func TestGetNodeRegistration(t *testing.T) {
 		},
 		{
 			name:          "invalid - no node",
-			fileContents:  kubeletConfFiles["configWithEmbeddedCert"],
+			fileContents:  configWithEmbeddedCert,
 			expectedError: true,
 		},
 	}
@@ -330,7 +236,7 @@ func TestGetNodeRegistration(t *testing.T) {
 			}
 
 			cfg := &kubeadmapi.InitConfiguration{}
-			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration, &cfg.ClusterConfiguration)
+			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration)
 			if rt.expectedError != (err != nil) {
 				t.Errorf("unexpected return err from getNodeRegistration: %v", err)
 				return
@@ -491,13 +397,14 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 	defer os.RemoveAll(tmpdir)
 
 	var tests = []struct {
-		name            string
-		fileContents    []byte
-		node            *v1.Node
-		staticPods      []testresources.FakeStaticPod
-		configMaps      []testresources.FakeConfigMap
-		newControlPlane bool
-		expectedError   bool
+		name                string
+		fileContents        []byte
+		node                *v1.Node
+		staticPods          []testresources.FakeStaticPod
+		configMaps          []testresources.FakeConfigMap
+		getNodeRegistration bool
+		getAPIEndpoint      bool
+		expectedError       bool
 	}{
 		{
 			name:          "invalid - No kubeadm-config ConfigMap",
@@ -544,7 +451,7 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 					},
 				},
 			},
-			fileContents: kubeletConfFiles["configWithEmbeddedCert"],
+			fileContents: configWithEmbeddedCert,
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: nodeName,
@@ -556,6 +463,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 					Taints: []v1.Taint{kubeadmconstants.ControlPlaneTaint},
 				},
 			},
+			getNodeRegistration: true,
+			getAPIEndpoint:      true,
 		},
 		{
 			name: "valid v1beta3 - new control plane == true", // InitConfiguration composed with data from different places, without node specific information
@@ -588,7 +497,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 					},
 				},
 			},
-			newControlPlane: true,
+			getNodeRegistration: false,
+			getAPIEndpoint:      false,
 		},
 	}
 
@@ -629,7 +539,8 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 				}
 			}
 
-			cfg, err := getInitConfigurationFromCluster(tmpdir, client, rt.newControlPlane, false)
+			getComponentConfigs := true
+			cfg, err := getInitConfigurationFromCluster(tmpdir, client, rt.getNodeRegistration, rt.getAPIEndpoint, getComponentConfigs)
 			if rt.expectedError != (err != nil) {
 				t.Errorf("unexpected return err from getInitConfigurationFromCluster: %v", err)
 				return
@@ -649,13 +560,13 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 			if cfg.NodeRegistration.ImagePullPolicy != kubeadmapiv1.DefaultImagePullPolicy {
 				t.Errorf("invalid cfg.NodeRegistration.ImagePullPolicy %v", cfg.NodeRegistration.ImagePullPolicy)
 			}
-			if !rt.newControlPlane && (cfg.LocalAPIEndpoint.AdvertiseAddress != "1.2.3.4" || cfg.LocalAPIEndpoint.BindPort != 1234) {
+			if rt.getNodeRegistration && rt.getAPIEndpoint && (cfg.LocalAPIEndpoint.AdvertiseAddress != "1.2.3.4" || cfg.LocalAPIEndpoint.BindPort != 1234) {
 				t.Errorf("invalid cfg.LocalAPIEndpoint: %v", cfg.LocalAPIEndpoint)
 			}
-			if !rt.newControlPlane && (cfg.NodeRegistration.Name != nodeName || cfg.NodeRegistration.CRISocket != "myCRIsocket" || len(cfg.NodeRegistration.Taints) != 1) {
+			if rt.getNodeRegistration && (cfg.NodeRegistration.Name != nodeName || cfg.NodeRegistration.CRISocket != "myCRIsocket" || len(cfg.NodeRegistration.Taints) != 1) {
 				t.Errorf("invalid cfg.NodeRegistration: %v", cfg.NodeRegistration)
 			}
-			if rt.newControlPlane && len(cfg.NodeRegistration.CRISocket) > 0 {
+			if !rt.getNodeRegistration && len(cfg.NodeRegistration.CRISocket) > 0 {
 				t.Errorf("invalid cfg.NodeRegistration.CRISocket: expected empty CRISocket, but got %v", cfg.NodeRegistration.CRISocket)
 			}
 			if _, ok := cfg.ComponentConfigs[componentconfigs.KubeletGroup]; !ok {

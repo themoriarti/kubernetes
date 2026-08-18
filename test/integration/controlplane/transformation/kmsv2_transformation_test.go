@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 /*
 Copyright 2022 The Kubernetes Authors.
@@ -405,6 +404,7 @@ resources:
 // 7. when kms-plugin is down, no-op update for a pod should succeed and not result in RV change even once the DEK/seed is valid
 func TestKMSv2ProviderKeyIDStaleness(t *testing.T) {
 	t.Parallel()
+
 	t.Run("regular gcm", func(t *testing.T) {
 		t.Parallel()
 		kmsName := "kms-provider-key-id-stale-false"
@@ -605,9 +605,10 @@ resources:
 	}
 
 	// Invalidate the DEK by moving the current time forward
-	origNowFunc := kmsv2.NowFunc
-	t.Cleanup(func() { kmsv2.NowFunc = origNowFunc })
-	kmsv2.NowFunc = func() time.Time { return origNowFunc().Add(5 * time.Minute) }
+	origNowFunc := kmsv2.GetNowFunc(kmsName)
+	t.Cleanup(kmsv2.SetNowFuncForTests(kmsName, func() time.Time {
+		return origNowFunc().Add(5 * time.Minute)
+	}))
 
 	// 6. when kms-plugin is down, expect creation of new pod and encryption to fail because the DEK is invalid
 	_, err = test.createPod(testNamespace, dynamicClient)
@@ -630,7 +631,7 @@ resources:
 	)
 
 	// fix plugin and wait for new writes to start working again
-	kmsv2.NowFunc = origNowFunc
+	t.Cleanup(kmsv2.SetNowFuncForTests(kmsName, origNowFunc))
 	pluginMock.ExitFailedState()
 	err = wait.Poll(time.Second, 3*time.Minute,
 		func() (bool, error) {
@@ -740,7 +741,7 @@ resources:
 
 	const podCount = 1_000
 
-	for i := 0; i < podCount; i++ {
+	for i := range podCount {
 		if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("dek-reuse-%04d", i+1), // making creation order match returned list order / nonce counter
@@ -1146,7 +1147,7 @@ resources:
 
 	secrets := make([]*api.Secret, dataLen)
 
-	for i := 0; i < dataLen; i++ {
+	for i := range dataLen {
 		secrets[i] = &api.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("test-secret-%d", i),
@@ -1165,7 +1166,7 @@ resources:
 			b.Fatal(err)
 		}
 
-		for i := 0; i < dataLen; i++ {
+		for i := range dataLen {
 			out, err := secretStorage.Create(ctx, secrets[i], noValidation, &metav1.CreateOptions{})
 			if err != nil {
 				b.Fatal(err)
@@ -1293,7 +1294,7 @@ resources:
 
 	secrets := make([]*corev1.Secret, dataLen)
 
-	for i := 0; i < dataLen; i++ {
+	for i := range dataLen {
 		secrets[i] = &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("test-secret-%d", i),
@@ -1312,7 +1313,7 @@ resources:
 			b.Fatal(err)
 		}
 
-		for i := 0; i < dataLen; i++ {
+		for i := range dataLen {
 			out, err := secretStorage.Create(ctx, secrets[i], metav1.CreateOptions{})
 			if err != nil {
 				b.Fatal(err)
@@ -1441,7 +1442,7 @@ resources:
 		t.Fatal(err)
 	}
 	if !proto.Equal(expectedDEKSourceHKDFSHA256XNonceAESGCMSeedObject, legacyDEKSourceHKDFSHA256XNonceAESGCMSeedObject) {
-		t.Errorf("kms v2 legacy encrypted object diff, want: %+v; got: %+v", expectedDEKSourceAESGCMKeyObject, legacyDEKSourceAESGCMKeyObject)
+		t.Errorf("kms v2 legacy encrypted object diff, want: %+v; got: %+v", expectedDEKSourceHKDFSHA256XNonceAESGCMSeedObject, legacyDEKSourceHKDFSHA256XNonceAESGCMSeedObject)
 	}
 
 	ctx := testContext(t)
@@ -1469,7 +1470,7 @@ resources:
 							APIVersion: "v1",
 							Time:       &dekSourceAESGCMKeyTime,
 							FieldsType: "FieldsV1",
-							FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:data":{".":{},"f:api_key":{}},"f:type":{}}`)},
+							FieldsV1:   metav1.NewFieldsV1(`{"f:data":{".":{},"f:api_key":{}},"f:type":{}}`),
 						},
 					},
 				},
@@ -1491,7 +1492,7 @@ resources:
 							APIVersion: "v1",
 							Time:       &dekSourceHKDFSHA256XNonceAESGCMSeedTime,
 							FieldsType: "FieldsV1",
-							FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:data":{".":{},"f:api_key":{}},"f:type":{}}`)},
+							FieldsV1:   metav1.NewFieldsV1(`{"f:data":{".":{},"f:api_key":{}},"f:type":{}}`),
 						},
 					},
 				},

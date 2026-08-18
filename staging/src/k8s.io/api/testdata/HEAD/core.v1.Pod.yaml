@@ -870,6 +870,8 @@ spec:
   schedulerName: schedulerNameValue
   schedulingGates:
   - name: nameValue
+  schedulingGroup:
+    podGroupName: podGroupNameValue
   securityContext:
     appArmorProfile:
       localhostProfile: localhostProfileValue
@@ -1162,6 +1164,8 @@ spec:
           keyType: keyTypeValue
           maxExpirationSeconds: 3
           signerName: signerNameValue
+          userAnnotations:
+            userAnnotationsKey: userAnnotationsValue
         secret:
           items:
           - key: keyValue
@@ -1224,6 +1228,8 @@ spec:
       storagePolicyName: storagePolicyNameValue
       volumePath: volumePathValue
 status:
+  allocatedResources:
+    allocatedResourcesKey: "0"
   conditions:
   - lastProbeTime: "2003-01-01T01:01:01Z"
     lastTransitionTime: "2004-01-01T01:01:01Z"
@@ -1239,6 +1245,7 @@ status:
     - name: nameValue
       resources:
       - health: healthValue
+        message: messageValue
         resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
@@ -1295,6 +1302,9 @@ status:
       name: nameValue
       readOnly: true
       recursiveReadOnly: recursiveReadOnlyValue
+      volumeStatus:
+        image:
+          imageRef: imageRefValue
   ephemeralContainerStatuses:
   - allocatedResources:
       allocatedResourcesKey: "0"
@@ -1302,6 +1312,7 @@ status:
     - name: nameValue
       resources:
       - health: healthValue
+        message: messageValue
         resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
@@ -1358,6 +1369,9 @@ status:
       name: nameValue
       readOnly: true
       recursiveReadOnly: recursiveReadOnlyValue
+      volumeStatus:
+        image:
+          imageRef: imageRefValue
   extendedResourceClaimStatus:
     requestMappings:
     - containerName: containerNameValue
@@ -1374,6 +1388,7 @@ status:
     - name: nameValue
       resources:
       - health: healthValue
+        message: messageValue
         resourceID: resourceIDValue
     containerID: containerIDValue
     image: imageValue
@@ -1430,7 +1445,16 @@ status:
       name: nameValue
       readOnly: true
       recursiveReadOnly: recursiveReadOnlyValue
+      volumeStatus:
+        image:
+          imageRef: imageRefValue
   message: messageValue
+  nodeAllocatableResourceClaimStatuses:
+  - containers:
+    - containersValue
+    resourceClaimName: resourceClaimNameValue
+    resources:
+      resourcesKey: "0"
   nominatedNodeName: nominatedNodeNameValue
   observedGeneration: 17
   phase: phaseValue
@@ -1443,4 +1467,12 @@ status:
   resourceClaimStatuses:
   - name: nameValue
     resourceClaimName: resourceClaimNameValue
+  resources:
+    claims:
+    - name: nameValue
+      request: requestValue
+    limits:
+      limitsKey: "0"
+    requests:
+      requestsKey: "0"
   startTime: "2007-01-01T01:01:01Z"

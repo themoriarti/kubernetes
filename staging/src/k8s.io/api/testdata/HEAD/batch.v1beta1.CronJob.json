@@ -451,7 +451,10 @@
                         "maxExpirationSeconds": 3,
                         "credentialBundlePath": "credentialBundlePathValue",
                         "keyPath": "keyPathValue",
-                        "certificateChainPath": "certificateChainPathValue"
+                        "certificateChainPath": "certificateChainPathValue",
+                        "userAnnotations": {
+                          "userAnnotationsKey": "userAnnotationsValue"
+                        }
                       }
                     }
                   ],
@@ -1927,7 +1930,10 @@
                 }
               ]
             },
-            "hostnameOverride": "hostnameOverrideValue"
+            "hostnameOverride": "hostnameOverrideValue",
+            "schedulingGroup": {
+              "podGroupName": "podGroupNameValue"
+            }
           }
         },
         "ttlSecondsAfterFinished": 8,

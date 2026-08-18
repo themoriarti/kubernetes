@@ -39,18 +39,23 @@ import (
 	"k8s.io/kubernetes/plugin/pkg/admission/extendedresourcetoleration"
 	"k8s.io/kubernetes/plugin/pkg/admission/gc"
 	"k8s.io/kubernetes/plugin/pkg/admission/imagepolicy"
+	jobadmission "k8s.io/kubernetes/plugin/pkg/admission/job"
 	"k8s.io/kubernetes/plugin/pkg/admission/limitranger"
 	"k8s.io/kubernetes/plugin/pkg/admission/namespace/autoprovision"
 	"k8s.io/kubernetes/plugin/pkg/admission/namespace/exists"
 	"k8s.io/kubernetes/plugin/pkg/admission/network/defaultingressclass"
 	"k8s.io/kubernetes/plugin/pkg/admission/network/denyserviceexternalips"
+	"k8s.io/kubernetes/plugin/pkg/admission/nodedeclaredfeatures"
 	"k8s.io/kubernetes/plugin/pkg/admission/noderestriction"
 	"k8s.io/kubernetes/plugin/pkg/admission/nodetaint"
+	"k8s.io/kubernetes/plugin/pkg/admission/podgroup"
 	"k8s.io/kubernetes/plugin/pkg/admission/podnodeselector"
+	"k8s.io/kubernetes/plugin/pkg/admission/podresize"
 	"k8s.io/kubernetes/plugin/pkg/admission/podtolerationrestriction"
 	"k8s.io/kubernetes/plugin/pkg/admission/podtopologylabels"
 	podpriority "k8s.io/kubernetes/plugin/pkg/admission/priority"
 	"k8s.io/kubernetes/plugin/pkg/admission/runtimeclass"
+	"k8s.io/kubernetes/plugin/pkg/admission/scheduling/podgroupprotection"
 	"k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity"
 	"k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/plugin/pkg/admission/storage/persistentvolume/resize"
@@ -87,6 +92,7 @@ var AllOrderedPlugins = []string{
 	extendedresourcetoleration.PluginName,   // ExtendedResourceToleration
 	setdefault.PluginName,                   // DefaultStorageClass
 	storageobjectinuseprotection.PluginName, // StorageObjectInUseProtection
+	podgroupprotection.PluginName,           // PodGroupProtection
 	gc.PluginName,                           // OwnerReferencesPermissionEnforcement
 	resize.PluginName,                       // PersistentVolumeClaimResize
 	runtimeclass.PluginName,                 // RuntimeClass
@@ -97,6 +103,10 @@ var AllOrderedPlugins = []string{
 	defaultingressclass.PluginName,          // DefaultIngressClass
 	denyserviceexternalips.PluginName,       // DenyServiceExternalIPs
 	podtopologylabels.PluginName,            // PodTopologyLabels
+	podgroup.PluginName,                     // PodGroupWorkloadExists
+	nodedeclaredfeatures.PluginName,         // NodeDeclaredFeatureValidator
+	jobadmission.PluginName,                 // JobValidation, only active when feature gate WorkloadWithJob is enabled.
+	podresize.PluginName,                    // PodResizeValidator
 
 	// new admission plugins should generally be inserted above here
 	// webhook, resourcequota, and deny plugins must go at the end
@@ -144,11 +154,16 @@ func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	setdefault.Register(plugins)
 	resize.Register(plugins)
 	storageobjectinuseprotection.Register(plugins)
+	podgroupprotection.Register(plugins)
 	certapproval.Register(plugins)
 	certsigning.Register(plugins)
 	ctbattest.Register(plugins)
 	certsubjectrestriction.Register(plugins)
 	podtopologylabels.Register(plugins)
+	podgroup.Register(plugins)
+	nodedeclaredfeatures.Register(plugins)
+	jobadmission.Register(plugins)
+	podresize.Register(plugins)
 }
 
 // DefaultOffAdmissionPlugins get admission plugins off by default for kube-apiserver.
@@ -164,6 +179,7 @@ func DefaultOffAdmissionPlugins() sets.Set[string] {
 		validatingwebhook.PluginName,            // ValidatingAdmissionWebhook
 		resourcequota.PluginName,                // ResourceQuota
 		storageobjectinuseprotection.PluginName, // StorageObjectInUseProtection
+		podgroupprotection.PluginName,           // PodGroupProtection
 		podpriority.PluginName,                  // Priority
 		nodetaint.PluginName,                    // TaintNodesByCondition
 		runtimeclass.PluginName,                 // RuntimeClass
@@ -176,6 +192,10 @@ func DefaultOffAdmissionPlugins() sets.Set[string] {
 		podtopologylabels.PluginName,            // PodTopologyLabels, only active when feature gate PodTopologyLabelsAdmission is enabled.
 		mutatingadmissionpolicy.PluginName,      // Mutatingadmissionpolicy, only active when feature gate MutatingAdmissionpolicy is enabled
 		validatingadmissionpolicy.PluginName,    // ValidatingAdmissionPolicy, only active when feature gate ValidatingAdmissionPolicy is enabled
+		podgroup.PluginName,                     // PodGroupWorkloadExists, only active when feature gate GenericWorkload is enabled
+		nodedeclaredfeatures.PluginName,         // NodeDeclaredFeatureValidator, only active when feature gate NodeDeclaredFeatures is enabled
+		jobadmission.PluginName,                 // JobValidation, only active when feature gate WorkloadWithJob is enabled
+		podresize.PluginName,                    // PodResizeValidator, only active when feature gate InPlacePodVerticalScaling is enabled
 	)
 
 	return sets.New(AllOrderedPlugins...).Difference(defaultOnPlugins)
